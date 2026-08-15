@@ -1,1 +1,28 @@
 /target
+
+# Local environment files
+.env
+.env.*
+*.env
+!.env.example
+!.env.*.example
+
+# Private keys and credential stores
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.kdbx
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+
+# Tool and service credentials
+.netrc
+.npmrc
+.pypirc
+credentials.json
+service-account*.json

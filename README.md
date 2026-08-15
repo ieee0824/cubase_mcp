@@ -43,7 +43,9 @@ Cubase
    ./target/release/cubase_mcp --install-midi-remote
    ```
 
-   既存の内容が異なる場合は、同じ場所に`.bak`を作ってから更新します。
+   Windows PowerShellでは2行目を`.\target\release\cubase_mcp.exe --install-midi-remote`として実行します。
+
+   インストール先のDocumentsフォルダーはOSの既知フォルダーAPIから取得するため、WindowsのフォルダーリダイレクトやOneDrive構成にも追従します。既存の内容が異なる場合は、同じ場所に`.bak`を作ってから更新します。
 
 2. MCPクライアントに次のように登録します。
 
@@ -67,7 +69,17 @@ Cubase MCP To Cubase
 Cubase MCP From Cubase
 ```
 
-利用可能なポートは`cubase_mcp --list-midi-ports`で確認できます。Windowsまたは既存のポートを使う場合は、`--midi-input <NAME> --midi-output <NAME>`をペアで指定してください。
+利用可能なポートは`cubase_mcp --list-midi-ports`で確認できます。Windowsまたは既存のループバックMIDIポートを使う場合、Cubase側の自動検出のためポート名には上記の文字列が必要です。デーモンから見た入出力は逆方向になるため、次のように指定します。
+
+```text
+cubase_mcp --bridge midi --midi-input "Cubase MCP From Cubase" --midi-output "Cubase MCP To Cubase"
+```
+
+MCPクライアントへ登録するときも同じ4引数を`args`へ追加してください。OSやMIDIドライバーがポート名へ接頭辞・接尾辞を追加する場合も、`Cubase MCP From Cubase`と`Cubase MCP To Cubase`がそれぞれの名前に含まれていれば使用できます。それ以外の名前は、デーモンだけが接続してCubase側のMIDI Remoteが検出できない状態を防ぐため起動時に拒否します。
+
+MIDI BridgeはCubase MIDI Remoteごとの一時instance IDを検出し、すべての操作を1インスタンス宛てに送信します。connection eventだけから単一instanceとは判断せず、未選択時は設定されたtimeout期間いっぱい読み取り専用discoveryを実行します。複数のCubaseインスタンスが観測された場合は、誤ったプロジェクトを操作しないよう`BUSY`を返します。余分なCubaseインスタンスを閉じてから再実行してください。
+
+discoveryと実際のTool要求にはそれぞれ独立したtimeout期間を割り当てます。MIDI Bridgeの`--timeout-ms`は500 ms以上が必要です。応答timeoutになったinstance IDは失効し、次回はキャッシュから再選択せずdiscoveryをやり直します。MIDI受信queueがoverflowした場合も選択状態を破棄して`BUSY`を返します。要求送信前に検出した場合は状態変更を開始せず、送信後に検出した場合は結果不明として扱って次回の再discoveryを必須にします。
 
 ## ビルドとテスト
 
@@ -139,9 +151,9 @@ cargo run --bin cubase_mcp -- --bridge tcp --bridge-address 127.0.0.1:8765
 | `--bridge-address` | `CUBASE_MCP_BRIDGE_ADDRESS` | `127.0.0.1:8765` |
 | `--midi-input` | なし | 仮想ポート |
 | `--midi-output` | なし | 仮想ポート |
-| `--timeout-ms` | `CUBASE_MCP_TIMEOUT_MS` | `2000` |
+| `--timeout-ms` | `CUBASE_MCP_TIMEOUT_MS` | `2000`（MIDI下限`500`） |
 
-`--bridge`は`midi`、`tcp`、`mock`です。実Cubaseには`midi`を使います。TCPの接続先とシミュレーターのlisten先はloopback interfaceに制限されます。タイムアウトは1〜600,000 msの範囲で設定できます。
+`--bridge`は`midi`、`tcp`、`mock`です。実Cubaseには`midi`を使います。TCPの接続先とシミュレーターのlisten先はloopback interfaceに制限されます。タイムアウトは1〜600,000 msの範囲で設定でき、MIDI Bridgeだけは安全なinstance discoveryのため下限が500 msです。
 
 ## 未接続時の動作
 

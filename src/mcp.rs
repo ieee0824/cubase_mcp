@@ -1,4 +1,4 @@
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 
 use serde_json::{Value, json};
 
@@ -46,12 +46,17 @@ impl McpServer {
     pub fn serve<R: BufRead, W: Write>(&mut self, mut reader: R, mut writer: W) -> io::Result<()> {
         loop {
             let mut bytes = Vec::new();
-            let byte_count = reader.read_until(b'\n', &mut bytes)?;
+            let byte_count = (&mut reader)
+                .take((MAX_MCP_MESSAGE_BYTES + 1) as u64)
+                .read_until(b'\n', &mut bytes)?;
             if byte_count == 0 {
                 return Ok(());
             }
 
             if bytes.len() > MAX_MCP_MESSAGE_BYTES {
+                if !bytes.ends_with(b"\n") {
+                    discard_through_newline(&mut reader)?;
+                }
                 write_message(
                     &mut writer,
                     &rpc_error(
@@ -248,6 +253,21 @@ impl McpServer {
             Ok(result) => rpc_success(id, tool_success(result)),
             Err(error) => rpc_success(id, tool_error(&error)),
         }
+    }
+}
+
+fn discard_through_newline(reader: &mut impl BufRead) -> io::Result<()> {
+    loop {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
+            return Ok(());
+        }
+        if let Some(index) = buffer.iter().position(|byte| *byte == b'\n') {
+            reader.consume(index + 1);
+            return Ok(());
+        }
+        let length = buffer.len();
+        reader.consume(length);
     }
 }
 
@@ -473,5 +493,16 @@ mod tests {
         let responses = run_session("not-json\n");
         assert_eq!(responses[0]["error"]["code"], PARSE_ERROR);
         assert!(responses[0]["id"].is_null());
+    }
+
+    #[test]
+    fn oversized_message_is_bounded_and_next_message_is_processed() {
+        let oversized = "x".repeat(MAX_MCP_MESSAGE_BYTES + 128);
+        let input = format!("{oversized}\n{}", initialize());
+        let responses = run_session(&input);
+
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0]["error"]["code"], INVALID_REQUEST);
+        assert_eq!(responses[1]["result"]["protocolVersion"], "2025-06-18");
     }
 }

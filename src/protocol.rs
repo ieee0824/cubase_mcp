@@ -75,7 +75,6 @@ pub enum BridgeIncoming {
     Response {
         version: u32,
         id: String,
-        #[serde(default = "empty_object")]
         result: Value,
     },
     Error {
@@ -86,7 +85,6 @@ pub enum BridgeIncoming {
     Event {
         version: u32,
         event: String,
-        #[serde(default = "empty_object")]
         data: Value,
     },
 }
@@ -252,5 +250,29 @@ mod tests {
         .unwrap();
 
         assert!(matches!(message, BridgeIncoming::Event { .. }));
+    }
+
+    #[test]
+    fn incoming_response_requires_result() {
+        let error = serde_json::from_value::<BridgeIncoming>(json!({
+            "version": 1,
+            "id": "req-1",
+            "type": "response"
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("result"));
+    }
+
+    #[test]
+    fn incoming_event_requires_data() {
+        let error = serde_json::from_value::<BridgeIncoming>(json!({
+            "version": 1,
+            "type": "event",
+            "event": "transport.changed"
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("data"));
     }
 }

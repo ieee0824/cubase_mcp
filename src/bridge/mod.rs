@@ -9,7 +9,10 @@ use serde_json::{Value, json};
 
 use crate::protocol::{BridgeError, BridgeRequest, ErrorCode};
 
-pub use midi::{DEFAULT_FROM_CUBASE_PORT, DEFAULT_TO_CUBASE_PORT, MidiBridge, MidiPortListing};
+pub use midi::{
+    DEFAULT_FROM_CUBASE_PORT, DEFAULT_TO_CUBASE_PORT, MIN_MIDI_TIMEOUT_MS, MidiBridge,
+    MidiPortListing,
+};
 pub use tcp::TcpBridge;
 
 /// A transport-neutral Cubase bridge endpoint.

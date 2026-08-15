@@ -32,6 +32,7 @@ page.makeValueBinding(recordFeedback, transport.mValue.mRecord).setTypeToggle()
 var activeDeviceRef = null
 var activeMappingRef = null
 var pendingTransportRequest = null
+var bridgeInstanceId = createInstanceId()
 var bridgeState = {
     playing: null,
     recording: null,
@@ -40,6 +41,7 @@ var bridgeState = {
 }
 
 var SYSEX_HEADER = [0xF0, 0x7D, 0x43, 0x4D, 0x43, 0x50, 0x01]
+var MIDI_TRANSPORT_VERSION = 1
 var MAX_JSON_BYTES = 65536
 
 deviceDriver.mOnActivate = function (activeDevice) {
@@ -118,15 +120,35 @@ midiInput.mOnSysex = function (activeDevice, midiMessage) {
         return
     }
 
-    var request = null
+    var envelope = null
     try {
-        request = JSON.parse(jsonText)
+        envelope = JSON.parse(jsonText)
     } catch (error) {
         return
     }
 
+    if (
+        envelope === null ||
+        typeof envelope !== 'object' ||
+        envelope.midi_transport_version !== MIDI_TRANSPORT_VERSION ||
+        !envelope.message ||
+        typeof envelope.message !== 'object'
+    ) {
+        return
+    }
+
+    var request = envelope.message
+
     var requestId = request && typeof request.id === 'string' ? request.id : null
     if (requestId === null) {
+        return
+    }
+
+    if (request.method === 'system.discover') {
+        if (envelope.target_instance_id !== null) {
+            return
+        }
+    } else if (envelope.target_instance_id !== bridgeInstanceId) {
         return
     }
 
@@ -167,6 +189,10 @@ function handleRequest(activeDevice, request) {
     }
 
     switch (request.method) {
+        case 'system.discover':
+            sendResponse(activeDevice, request.id, { instance_id: bridgeInstanceId })
+            return
+
         case 'system.get_status':
             sendResponse(activeDevice, request.id, {
                 connected: true,
@@ -310,7 +336,11 @@ function sendTransportEvent(activeDevice) {
 }
 
 function sendMessage(activeDevice, value) {
-    var text = JSON.stringify(value)
+    var text = JSON.stringify({
+        midi_transport_version: MIDI_TRANSPORT_VERSION,
+        source_instance_id: bridgeInstanceId,
+        message: value
+    })
     var bytes = utf8Encode(text)
     if (bytes.length > MAX_JSON_BYTES) {
         return
@@ -323,6 +353,12 @@ function sendMessage(activeDevice, value) {
     }
     message.push(0xF7)
     midiOutput.sendMidi(activeDevice, message)
+}
+
+function createInstanceId() {
+    var timestamp = new Date().getTime().toString(36)
+    var random = Math.floor(Math.random() * 0x7FFFFFFF).toString(36)
+    return 'cubase-' + timestamp + '-' + random
 }
 
 function decodeFrame(message) {

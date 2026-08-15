@@ -102,18 +102,26 @@ function decode(message) {
     return JSON.parse(Buffer.from(bytes).toString('utf8'))
 }
 
-function request(id, method) {
+function request(id, method, targetInstanceId) {
     context.midiInput.mOnSysex({}, encode({
-        version: 1,
-        id,
-        type: 'request',
-        method,
-        params: {}
+        midi_transport_version: 1,
+        target_instance_id: targetInstanceId,
+        message: {
+            version: 1,
+            id,
+            type: 'request',
+            method,
+            params: {}
+        }
     }))
 }
 
-function messages() {
+function envelopes() {
     return sentMidi.map(decode)
+}
+
+function messages() {
+    return envelopes().map(envelope => envelope.message)
 }
 
 function response(id) {
@@ -125,13 +133,25 @@ const activeMapping = {}
 context.deviceDriver.mOnActivate(activeDevice)
 context.page.mOnActivate(activeDevice, activeMapping)
 assert(messages().some(message => message.event === 'connection.changed'))
+const instanceId = envelopes()[0].source_instance_id
+assert.match(instanceId, /^cubase-/)
+assert(envelopes().every(envelope => envelope.source_instance_id === instanceId))
 sentMidi.length = 0
 
-request('status-日本語', 'system.get_status')
+request('discover-1', 'system.discover', null)
+assert.equal(response('discover-1').result.instance_id, instanceId)
+sentMidi.length = 0
+
+request('untargeted-play', 'transport.play', null)
+request('wrong-target-play', 'transport.play', 'another-cubase')
+assert.equal(increments.play, 0)
+assert.equal(sentMidi.length, 0)
+
+request('status-日本語', 'system.get_status', instanceId)
 assert.equal(response('status-日本語').result.tempo, null)
 sentMidi.length = 0
 
-request('play-1', 'transport.play')
+request('play-1', 'transport.play', instanceId)
 assert.equal(increments.play, 1)
 assert.equal(response('play-1'), undefined)
 surfaceState['Playback State'] = 1
@@ -139,12 +159,12 @@ context.playFeedback.mOnProcessValueChange(activeDevice, 1)
 assert.deepEqual(response('play-1').result, {})
 sentMidi.length = 0
 
-request('play-idempotent', 'transport.play')
+request('play-idempotent', 'transport.play', instanceId)
 assert.equal(increments.play, 1)
 assert.deepEqual(response('play-idempotent').result, {})
 sentMidi.length = 0
 
-request('stop-1', 'transport.stop')
+request('stop-1', 'transport.stop', instanceId)
 assert.equal(increments.stop, 1)
 assert.equal(response('stop-1'), undefined)
 surfaceState['Playback State'] = 0
@@ -158,10 +178,16 @@ context.transport.mTimeDisplay.mPrimary.mTransportLocator.mOnChange(
     '32. 2. 1. 0',
     '小節 + 拍'
 )
-request('transport-1', 'transport.get')
+request('transport-1', 'transport.get', instanceId)
 assert.deepEqual(JSON.parse(JSON.stringify(response('transport-1').result.position)), {
     bars: 32,
     beats: 2
 })
+
+sentMidi.length = 0
+context.page.mOnDeactivate(activeDevice)
+sentMidi.length = 0
+request('discover-inactive', 'system.discover', null)
+assert.equal(response('discover-inactive').error.code, 'NOT_CONNECTED')
 
 console.log('Cubase MIDI Remote script tests passed')

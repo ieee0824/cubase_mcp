@@ -10,13 +10,13 @@ const INSTALL_SUBDIRECTORY: &str = "CubaseMCP/CubaseMCP";
 const SCRIPT_FILE_NAME: &str = "CubaseMCP_CubaseMCP.js";
 
 pub fn install_midi_remote() -> io::Result<Vec<PathBuf>> {
-    let home = std::env::var_os("HOME").ok_or_else(|| {
+    let documents = dirs::document_dir().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
-            "HOME is not set; cannot locate the Steinberg documents directory",
+            "The operating system did not provide a Documents directory; cannot locate the Steinberg directory",
         )
     })?;
-    let steinberg = PathBuf::from(home).join("Documents/Steinberg");
+    let steinberg = documents.join("Steinberg");
     let mut roots = Vec::new();
     for entry in fs::read_dir(&steinberg)? {
         let entry = entry?;

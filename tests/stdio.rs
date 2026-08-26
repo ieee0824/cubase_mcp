@@ -29,6 +29,15 @@ fn binary_keeps_mcp_on_stdout_and_logs_on_stderr() {
             "jsonrpc": "2.0",
             "id": 2,
             "method": "tools/call",
+            "params": {
+                "name": "cubase.play",
+                "arguments": {"sentinel": "must-not-appear-in-logs"}
+            }
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
             "params": {"name": "cubase.get_status", "arguments": {}}
         }),
     ];
@@ -49,13 +58,19 @@ fn binary_keeps_mcp_on_stdout_and_logs_on_stderr() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(responses.len(), 2);
+    assert_eq!(responses.len(), 3);
+    assert_eq!(responses[1]["result"]["isError"], true);
     assert_eq!(
-        responses[1]["result"]["structuredContent"]["connected"],
+        responses[1]["result"]["structuredContent"]["error"]["code"],
+        "INVALID_ARGUMENT"
+    );
+    assert_eq!(
+        responses[2]["result"]["structuredContent"]["connected"],
         true
     );
 
     let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(!stderr.contains("must-not-appear-in-logs"));
     let logs: Vec<Value> = stderr
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())

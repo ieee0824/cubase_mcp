@@ -826,7 +826,7 @@ fn decode_sysex(frame: &[u8]) -> Result<MidiIncomingEnvelope, BridgeError> {
     }
 
     let mut json_bytes = Vec::with_capacity(payload.len() / 2);
-    for nibbles in payload.chunks_exact(2) {
+    for nibbles in payload.as_chunks::<2>().0 {
         if nibbles[0] > 0x0F || nibbles[1] > 0x0F {
             return Err(BridgeError::protocol(
                 "MIDI SysEx payload contains a non-nibble byte",

@@ -6,6 +6,7 @@ use serde_json::{Map, Value, json};
 
 use crate::bridge::CubaseBridge;
 use crate::protocol::{BridgeError, BridgeRequest, ErrorCode};
+use crate::tools::{ToolSpec, find_tool};
 
 const STATUS_METHOD: &str = "system.get_status";
 
@@ -30,26 +31,32 @@ impl IntegrationService {
         }
     }
 
-    pub fn invoke_tool(&self, tool_name: &str) -> Result<Value, BridgeError> {
-        let bridge_method = match tool_name {
-            "cubase.get_status" => STATUS_METHOD,
-            "cubase.play" => "transport.play",
-            "cubase.stop" => "transport.stop",
-            "cubase.record" => "transport.record",
-            "cubase.get_transport" => "transport.get",
-            "cubase.get_capabilities" => "capabilities.get",
-            _ => {
-                return Err(BridgeError::new(
-                    ErrorCode::NotSupported,
-                    format!("MCP tool '{tool_name}' is not supported"),
-                ));
-            }
+    pub fn invoke_tool(
+        &self,
+        tool_name: &str,
+        arguments: Map<String, Value>,
+    ) -> Result<Value, BridgeError> {
+        let Some(spec) = find_tool(tool_name) else {
+            return Err(BridgeError::new(
+                ErrorCode::NotSupported,
+                format!("MCP tool '{tool_name}' is not supported"),
+            ));
         };
 
-        match self.invoke_bridge(bridge_method) {
-            Ok(value) => normalize_result(bridge_method, value),
+        self.invoke_spec(spec, arguments)
+    }
+
+    fn invoke_spec(
+        &self,
+        spec: &ToolSpec,
+        arguments: Map<String, Value>,
+    ) -> Result<Value, BridgeError> {
+        let params = spec.validate_arguments(arguments)?;
+
+        match self.invoke_bridge(spec.bridge_method, params) {
+            Ok(value) => normalize_result(spec.bridge_method, value),
             Err(error)
-                if bridge_method == STATUS_METHOD && error.code == ErrorCode::NotConnected =>
+                if spec.bridge_method == STATUS_METHOD && error.code == ErrorCode::NotConnected =>
             {
                 Ok(json!({
                     "connected": false,
@@ -63,13 +70,17 @@ impl IntegrationService {
         }
     }
 
-    fn invoke_bridge(&self, method: &str) -> Result<Value, BridgeError> {
+    fn invoke_bridge(
+        &self,
+        method: &str,
+        params: Map<String, Value>,
+    ) -> Result<Value, BridgeError> {
         let request_id = format!(
             "req-{}-{}",
             self.session_prefix,
             self.request_sequence.fetch_add(1, Ordering::Relaxed)
         );
-        let request = BridgeRequest::new(request_id.clone(), method, json!({}));
+        let request = BridgeRequest::new(request_id.clone(), method, Value::Object(params));
         let started = Instant::now();
         let result = self.bridge.call(&request, self.timeout);
         log_request(
@@ -291,8 +302,58 @@ fn log_request(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
     use crate::bridge::MockBridge;
+    use crate::tools::{ArgumentSpec, ArgumentType};
+
+    const PAGINATED_ARGUMENTS: &[ArgumentSpec] = &[
+        ArgumentSpec {
+            name: "cursor",
+            description: "Opaque pagination cursor.",
+            argument_type: ArgumentType::String {
+                min_length: Some(1),
+                max_length: Some(128),
+            },
+            required: false,
+        },
+        ArgumentSpec {
+            name: "limit",
+            description: "Maximum number of results.",
+            argument_type: ArgumentType::Integer {
+                minimum: Some(1),
+                maximum: Some(100),
+            },
+            required: true,
+        },
+    ];
+
+    const PAGINATED_TOOL: ToolSpec = ToolSpec {
+        name: "test.paginated",
+        title: "Test Paginated Tool",
+        description: "Test optional and required argument forwarding.",
+        bridge_method: "transport.play",
+        read_only: true,
+        idempotent: true,
+        arguments: PAGINATED_ARGUMENTS,
+    };
+
+    #[derive(Default)]
+    struct RecordingBridge {
+        requests: Mutex<Vec<BridgeRequest>>,
+    }
+
+    impl CubaseBridge for RecordingBridge {
+        fn call(&self, request: &BridgeRequest, _timeout: Duration) -> Result<Value, BridgeError> {
+            self.requests.lock().unwrap().push(request.clone());
+            Ok(json!({}))
+        }
+
+        fn is_connected(&self) -> bool {
+            true
+        }
+    }
 
     #[test]
     fn status_reports_disconnected_without_failing_tool_call() {
@@ -300,7 +361,9 @@ mod tests {
         bridge.set_connected(false);
         let service = IntegrationService::new(bridge, Duration::from_millis(10));
 
-        let status = service.invoke_tool("cubase.get_status").unwrap();
+        let status = service
+            .invoke_tool("cubase.get_status", Map::new())
+            .unwrap();
         assert_eq!(status["connected"], false);
         assert!(status["tempo"].is_null());
     }
@@ -310,10 +373,96 @@ mod tests {
         let service =
             IntegrationService::new(Arc::new(MockBridge::new()), Duration::from_millis(10));
 
-        service.invoke_tool("cubase.record").unwrap();
-        let transport = service.invoke_tool("cubase.get_transport").unwrap();
+        service.invoke_tool("cubase.record", Map::new()).unwrap();
+        let transport = service
+            .invoke_tool("cubase.get_transport", Map::new())
+            .unwrap();
         assert_eq!(transport["playing"], true);
         assert_eq!(transport["recording"], true);
+    }
+
+    #[test]
+    fn empty_tool_arguments_are_forwarded_to_bridge() {
+        let bridge = Arc::new(RecordingBridge::default());
+        let service = IntegrationService::new(bridge.clone(), Duration::from_millis(10));
+
+        service.invoke_tool("cubase.play", Map::new()).unwrap();
+
+        let requests = bridge.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "transport.play");
+        assert_eq!(requests[0].params, json!({}));
+    }
+
+    #[test]
+    fn validated_nonempty_tool_arguments_are_forwarded_to_bridge() {
+        let bridge = Arc::new(RecordingBridge::default());
+        let service = IntegrationService::new(bridge.clone(), Duration::from_millis(10));
+        let arguments = serde_json::from_value(json!({
+            "cursor": "next-page",
+            "limit": 25
+        }))
+        .unwrap();
+
+        service.invoke_spec(&PAGINATED_TOOL, arguments).unwrap();
+
+        let requests = bridge.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "transport.play");
+        assert_eq!(
+            requests[0].params,
+            json!({"cursor": "next-page", "limit": 25})
+        );
+    }
+
+    #[test]
+    fn invalid_structured_tool_arguments_do_not_reach_bridge() {
+        let bridge = Arc::new(RecordingBridge::default());
+        let service = IntegrationService::new(bridge.clone(), Duration::from_millis(10));
+
+        for arguments in [
+            json!({"cursor": "next-page"}),
+            json!({"limit": "25"}),
+            json!({"limit": 25, "unexpected": true}),
+        ] {
+            let arguments = serde_json::from_value(arguments).unwrap();
+            let error = service.invoke_spec(&PAGINATED_TOOL, arguments).unwrap_err();
+            assert_eq!(error.code, ErrorCode::InvalidArgument);
+        }
+
+        assert!(bridge.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn invalid_tool_arguments_do_not_reach_bridge() {
+        let bridge = Arc::new(RecordingBridge::default());
+        let service = IntegrationService::new(bridge.clone(), Duration::from_millis(10));
+        let mut arguments = Map::new();
+        arguments.insert("unexpected".into(), json!(true));
+
+        let error = service.invoke_tool("cubase.play", arguments).unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
+        assert_eq!(
+            error.message,
+            "Tool 'cubase.play' does not accept arguments"
+        );
+        assert!(bridge.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn invalid_status_arguments_are_not_hidden_by_disconnected_fallback() {
+        let bridge = Arc::new(MockBridge::new());
+        bridge.set_connected(false);
+        let service = IntegrationService::new(bridge, Duration::from_millis(10));
+        let mut arguments = Map::new();
+        arguments.insert("sentinel".into(), json!("must-not-be-logged"));
+
+        let error = service
+            .invoke_tool("cubase.get_status", arguments)
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::InvalidArgument);
     }
 
     #[test]

@@ -2,8 +2,9 @@ use std::io::{self, BufRead, Read, Write};
 
 use serde_json::{Value, json};
 
-use crate::protocol::{BridgeError, ErrorCode};
+use crate::protocol::BridgeError;
 use crate::service::IntegrationService;
+use crate::tools::{TOOL_SPECS, find_tool};
 
 pub const LATEST_MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const SUPPORTED_MCP_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -228,7 +229,7 @@ impl McpServer {
         let Some(tool_name) = params.get("name").and_then(Value::as_str) else {
             return rpc_error(id, INVALID_PARAMS, "tools/call requires a tool name");
         };
-        if !is_known_tool(tool_name) {
+        if find_tool(tool_name).is_none() {
             return rpc_error(id, INVALID_PARAMS, &format!("Unknown tool '{tool_name}'"));
         }
 
@@ -236,20 +237,11 @@ impl McpServer {
             .get("arguments")
             .cloned()
             .unwrap_or_else(|| json!({}));
-        let Some(arguments) = arguments.as_object() else {
+        let Some(arguments) = arguments.as_object().cloned() else {
             return rpc_error(id, INVALID_PARAMS, "Tool arguments must be an object");
         };
-        if !arguments.is_empty() {
-            return rpc_success(
-                id,
-                tool_error(&BridgeError::new(
-                    ErrorCode::InvalidArgument,
-                    format!("Tool '{tool_name}' does not accept arguments"),
-                )),
-            );
-        }
 
-        match self.service.invoke_tool(tool_name) {
+        match self.service.invoke_tool(tool_name, arguments) {
             Ok(result) => rpc_success(id, tool_success(result)),
             Err(error) => rpc_success(id, tool_error(&error)),
         }
@@ -272,87 +264,10 @@ fn discard_through_newline(reader: &mut impl BufRead) -> io::Result<()> {
 }
 
 fn tool_definitions() -> Vec<Value> {
-    vec![
-        tool_definition(
-            "cubase.get_status",
-            "Get Cubase Status",
-            "Get Cubase bridge connectivity and basic project/transport state.",
-            true,
-            true,
-        ),
-        tool_definition(
-            "cubase.play",
-            "Start Cubase Playback",
-            "Start playback in the open Cubase project.",
-            false,
-            true,
-        ),
-        tool_definition(
-            "cubase.stop",
-            "Stop Cubase Transport",
-            "Stop playback or recording in Cubase.",
-            false,
-            true,
-        ),
-        tool_definition(
-            "cubase.record",
-            "Start Cubase Recording",
-            "Start recording in the open Cubase project.",
-            false,
-            true,
-        ),
-        tool_definition(
-            "cubase.get_transport",
-            "Get Cubase Transport",
-            "Get playback, recording, tempo, and musical position when available.",
-            true,
-            true,
-        ),
-        tool_definition(
-            "cubase.get_capabilities",
-            "Get Cubase Capabilities",
-            "Get the features supported by the active Cubase bridge.",
-            true,
-            true,
-        ),
-    ]
-}
-
-fn tool_definition(
-    name: &str,
-    title: &str,
-    description: &str,
-    read_only: bool,
-    idempotent: bool,
-) -> Value {
-    json!({
-        "name": name,
-        "title": title,
-        "description": description,
-        "inputSchema": {
-            "type": "object",
-            "properties": {},
-            "additionalProperties": false
-        },
-        "annotations": {
-            "readOnlyHint": read_only,
-            "destructiveHint": false,
-            "idempotentHint": idempotent,
-            "openWorldHint": false
-        }
-    })
-}
-
-fn is_known_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "cubase.get_status"
-            | "cubase.play"
-            | "cubase.stop"
-            | "cubase.record"
-            | "cubase.get_transport"
-            | "cubase.get_capabilities"
-    )
+    TOOL_SPECS
+        .iter()
+        .map(|spec| spec.mcp_definition())
+        .collect()
 }
 
 fn tool_success(result: Value) -> Value {
@@ -438,7 +353,13 @@ mod tests {
         let responses = run_session(&input);
         assert_eq!(responses.len(), 2);
         assert_eq!(responses[0]["result"]["protocolVersion"], "2025-06-18");
-        assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 6);
+        let tools = responses[1]["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 6);
+        for tool in tools {
+            assert_eq!(tool["inputSchema"]["properties"], json!({}));
+            assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+            assert!(tool["inputSchema"].get("required").is_none());
+        }
     }
 
     #[test]
@@ -461,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_tool_arguments_are_visible_to_the_model() {
+    fn omitted_tool_arguments_default_to_an_empty_object() {
         let input = format!(
             "{}{}\n",
             initialize(),
@@ -469,16 +390,77 @@ mod tests {
                 "jsonrpc": "2.0",
                 "id": 2,
                 "method": "tools/call",
-                "params": {"name": "cubase.play", "arguments": {"unexpected": true}}
+                "params": {"name": "cubase.get_transport"}
             })
         );
         let responses = run_session(&input);
-        let result = &responses[1]["result"];
-        assert_eq!(result["isError"], true);
-        assert_eq!(
-            result["structuredContent"]["error"]["code"],
-            "INVALID_ARGUMENT"
-        );
+        assert_eq!(responses[1]["result"]["isError"], false);
+    }
+
+    #[test]
+    fn nonempty_arguments_are_tool_errors_for_all_existing_tools() {
+        let tool_names = [
+            "cubase.get_status",
+            "cubase.play",
+            "cubase.stop",
+            "cubase.record",
+            "cubase.get_transport",
+            "cubase.get_capabilities",
+        ];
+        let mut input = initialize().to_owned();
+        for (index, tool_name) in tool_names.iter().enumerate() {
+            input.push_str(
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": index + 2,
+                    "method": "tools/call",
+                    "params": {"name": tool_name, "arguments": {"unexpected": true}}
+                })
+                .to_string(),
+            );
+            input.push('\n');
+        }
+
+        let responses = run_session(&input);
+        assert_eq!(responses.len(), tool_names.len() + 1);
+        for response in &responses[1..] {
+            let result = &response["result"];
+            assert_eq!(result["isError"], true);
+            assert_eq!(
+                result["structuredContent"]["error"]["code"],
+                "INVALID_ARGUMENT"
+            );
+        }
+    }
+
+    #[test]
+    fn non_object_tool_arguments_are_json_rpc_invalid_params() {
+        let invalid_arguments = [
+            Value::Null,
+            json!([]),
+            json!("invalid"),
+            json!(1),
+            json!(true),
+        ];
+        let mut input = initialize().to_owned();
+        for (index, arguments) in invalid_arguments.iter().enumerate() {
+            input.push_str(
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": index + 2,
+                    "method": "tools/call",
+                    "params": {"name": "cubase.play", "arguments": arguments}
+                })
+                .to_string(),
+            );
+            input.push('\n');
+        }
+
+        let responses = run_session(&input);
+        assert_eq!(responses.len(), invalid_arguments.len() + 1);
+        for response in &responses[1..] {
+            assert_eq!(response["error"]["code"], INVALID_PARAMS);
+        }
     }
 
     #[test]

@@ -10,3 +10,4 @@ pub mod installer;
 pub mod mcp;
 pub mod protocol;
 pub mod service;
+pub(crate) mod tools;

@@ -177,7 +177,7 @@ cargo run --bin cubase_mcp -- --bridge tcp --bridge-address 127.0.0.1:8765
 ## 現在のPhase
 
 - MVP: 実装済み（Integration Daemon、protocol、MIDI Remote Control Bridge、TCP、mock）
-- Phase 2 Track API: 未実装
+- Phase 2 Track API: 未実装。実機調査では[Track API実機検証fixture](docs/track-api-fixture.md)を使用
 - Phase 3 Marker / Command API: 未実装
 - Phase 4 VST3 / Audio Analysis: 未実装
 - 実Cubase向けTransport Control Bridge: 実装・実機確認済み

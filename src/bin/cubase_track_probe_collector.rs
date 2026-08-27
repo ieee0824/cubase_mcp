@@ -23,6 +23,11 @@ use sha2::{Digest, Sha256};
 const TO_CUBASE_PORT: &str = "Cubase MCP Track Probe To Cubase";
 const FROM_CUBASE_PORT: &str = "Cubase MCP Track Probe From Cubase";
 const PROBE_SYSEX_HEADER: [u8; 7] = [0xF0, 0x7D, b'C', b'M', b'T', b'P', 0x01];
+// Cubase sends the Universal Non-Realtime broadcast Identity Request when a
+// new virtual MIDI output appears. It is transport discovery traffic, not a
+// Track Probe frame. Keep the exception exact so every other foreign SysEx
+// still fails closed.
+const MIDI_BROADCAST_IDENTITY_REQUEST: [u8; 6] = [0xF0, 0x7E, 0x7F, 0x06, 0x01, 0xF7];
 const PROBE_TRANSPORT_VERSION: u32 = 1;
 const PROBE_MESSAGE_VERSION: u32 = 1;
 const MAX_JSON_BYTES: usize = 64 * 1024;
@@ -415,6 +420,9 @@ macOS/Linux default virtual ports:
 
 Windows requires both MIDI port options. On macOS/Linux, passing both options
 selects existing ports instead of creating the dedicated virtual ports.
+Cubase may poll a newly visible output with the exact Universal Identity Request
+F0 7E 7F 06 01 F7. The collector ignores only that six-byte transport request;
+every other foreign SysEx remains a fatal integrity error.
 
 stdin accepts one JSON command per line. The collector assigns the request id.
 This C15/DirectAccess-active example shows the required command order; perform
@@ -1043,6 +1051,9 @@ fn receive_midi(timestamp: u64, message: &[u8], state: &mut MidiCallbackState) {
             state.integrity_failed.store(true, Ordering::Release);
         }
         let ingress = match item {
+            FramerItem::Frame(bytes) if bytes.as_slice() == MIDI_BROADCAST_IDENTITY_REQUEST => {
+                continue;
+            }
             FramerItem::Frame(bytes) => Ingress::Frame {
                 received_at_unix_ms: unix_timestamp_ms(),
                 received_at_monotonic: Instant::now(),
@@ -5284,6 +5295,120 @@ mod tests {
     }
 
     #[test]
+    fn receive_ignores_only_the_exact_broadcast_identity_request() {
+        let (sender, receiver) = mpsc::sync_channel(16);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let failed = Arc::new(AtomicBool::new(false));
+        let progress = Arc::new(IngressProgress::default());
+        let mut state = MidiCallbackState {
+            sender,
+            framer: SysexFramer::default(),
+            dropped_items: Arc::clone(&dropped),
+            integrity_failed: Arc::clone(&failed),
+            ingress_progress: Arc::clone(&progress),
+        };
+
+        for split in 1..MIDI_BROADCAST_IDENTITY_REQUEST.len() {
+            receive_midi(0, &MIDI_BROADCAST_IDENTITY_REQUEST[..split], &mut state);
+            assert!(state.framer.has_partial_frame());
+            assert!(receiver.try_recv().is_err());
+            receive_midi(0, &MIDI_BROADCAST_IDENTITY_REQUEST[split..], &mut state);
+            assert!(!state.framer.has_partial_frame());
+            assert!(receiver.try_recv().is_err());
+        }
+        receive_midi(0, &MIDI_BROADCAST_IDENTITY_REQUEST, &mut state);
+
+        assert!(!state.framer.has_partial_frame());
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(progress.received.load(Ordering::Acquire), 0);
+        assert_eq!(dropped.load(Ordering::Acquire), 0);
+        assert!(!failed.load(Ordering::Acquire));
+        progress.synchronize(&failed).unwrap();
+
+        let near_matches = [
+            [0xF0, 0x7E, 0x01, 0x06, 0x01, 0xF7].as_slice(),
+            [0xF0, 0x7E, 0x7F, 0x06, 0x02, 0xF7].as_slice(),
+            [0xF0, 0x7F, 0x7F, 0x06, 0x01, 0xF7].as_slice(),
+            [0xF0, 0x7E, 0x7F, 0x06, 0x01, 0x00, 0xF7].as_slice(),
+        ];
+        for near_match in near_matches {
+            receive_midi(0, near_match, &mut state);
+            let Ingress::Frame { bytes, .. } = receiver.try_recv().unwrap() else {
+                panic!("a near-match must remain normal fail-closed ingress");
+            };
+            assert_eq!(bytes, near_match);
+            assert_eq!(decode_incoming(&bytes).unwrap_err().code, "INVALID_FRAME");
+            progress.mark_processed(&failed);
+        }
+        assert_eq!(progress.received.load(Ordering::Acquire), 4);
+        progress.synchronize(&failed).unwrap();
+
+        let first_probe =
+            encode_sysex(&incoming("source-a", 1, loaded_message("source-a"))).unwrap();
+        let second_probe =
+            encode_sysex(&incoming("source-a", 2, mapping_active_message("source-a"))).unwrap();
+        let mixed = [
+            MIDI_BROADCAST_IDENTITY_REQUEST.as_slice(),
+            first_probe.as_slice(),
+            MIDI_BROADCAST_IDENTITY_REQUEST.as_slice(),
+            second_probe.as_slice(),
+        ]
+        .concat();
+        receive_midi(0, &mixed, &mut state);
+        for expected in [&first_probe, &second_probe] {
+            let Ingress::Frame { bytes, .. } = receiver.try_recv().unwrap() else {
+                panic!("probe frames surrounding identity noise must be retained");
+            };
+            assert_eq!(&bytes, expected);
+            progress.mark_processed(&failed);
+        }
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(progress.received.load(Ordering::Acquire), 6);
+        progress.synchronize(&failed).unwrap();
+
+        receive_midi(0, &first_probe[..3], &mut state);
+        assert!(state.framer.has_partial_frame());
+        receive_midi(0, &MIDI_BROADCAST_IDENTITY_REQUEST, &mut state);
+        let Ingress::FramingFault { fault, .. } = receiver.try_recv().unwrap() else {
+            panic!("identity traffic must not hide a nested SysEx fault");
+        };
+        assert_eq!(fault, FramingFault::NestedStart);
+        assert!(receiver.try_recv().is_err());
+        assert!(failed.load(Ordering::Acquire));
+        progress.mark_processed(&failed);
+        assert!(!state.framer.has_partial_frame());
+    }
+
+    #[test]
+    fn identity_request_does_not_consume_a_full_ingress_queue() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let failed = Arc::new(AtomicBool::new(false));
+        let progress = Arc::new(IngressProgress::default());
+        let mut state = MidiCallbackState {
+            sender,
+            framer: SysexFramer::default(),
+            dropped_items: Arc::clone(&dropped),
+            integrity_failed: Arc::clone(&failed),
+            ingress_progress: Arc::clone(&progress),
+        };
+        let probe = encode_sysex(&incoming("source-a", 1, loaded_message("source-a"))).unwrap();
+
+        receive_midi(0, &probe, &mut state);
+        receive_midi(0, &MIDI_BROADCAST_IDENTITY_REQUEST, &mut state);
+
+        assert_eq!(dropped.load(Ordering::Acquire), 0);
+        assert!(!failed.load(Ordering::Acquire));
+        assert_eq!(progress.received.load(Ordering::Acquire), 1);
+        let Ingress::Frame { bytes, .. } = receiver.try_recv().unwrap() else {
+            panic!("the queued probe frame must remain intact");
+        };
+        assert_eq!(bytes, probe);
+        progress.mark_processed(&failed);
+        progress.synchronize(&failed).unwrap();
+    }
+
+    #[test]
     fn bounded_ingress_queue_records_drop_and_fails_closed() {
         let (sender, _receiver) = mpsc::sync_channel(1);
         let dropped = AtomicU64::new(0);
@@ -7331,6 +7456,8 @@ mod tests {
         assert!(help.contains(SELECTED_TARGET_ALIAS));
         assert!(help.contains("after the atomic send attempt"));
         assert!(help.contains("`sent` remains authoritative"));
+        assert!(help.contains("F0 7E 7F 06 01 F7"));
+        assert!(help.contains("every other foreign SysEx remains a fatal integrity error"));
     }
 
     #[test]

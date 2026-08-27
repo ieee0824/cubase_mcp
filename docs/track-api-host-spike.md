@@ -110,9 +110,11 @@ Probe / collectorのrepository内artifactとoffline commandは次で固定しま
 | collector test | `cargo test --all-targets --locked` | 確定 |
 | collector build | `cargo build --release --locked` | 確定 |
 | collector binary | `target/release/cubase_track_probe_collector`（Windowsは`.exe`） | 確定 |
+| probe installer | `target/release/cubase_mcp --install-track-probe --midi-remote-root <LOCAL_ROOT>`（Windowsは`.exe`） | 確定 |
 | collector output format | flushed JSON Lines、`record_format_version = 1` | 確定 |
 | deployed probe location | repository外のlocal Cubase MIDI Remote script directory | `PENDING_RUNTIME` |
 | source SHA-256 | run開始時にrepository sourceから取得 | `PENDING_RUNTIME` |
+| installer embedded SHA-256 | current HEADからbuildしたinstaller JSON reportから取得 | `PENDING_RUNTIME` |
 | deployed SHA-256 | run開始時に配備済みsourceから取得 | `PENDING_RUNTIME` |
 | repository commit | run開始時の40桁commit SHA | `PENDING_RUNTIME` |
 
@@ -134,7 +136,7 @@ target/release/cubase_track_probe_collector \
   --run-id <RUN_ID> \
   --discovery-window-ms 1000 \
   --drain-timeout-ms 5000 \
-  > <REPOSITORY_OUTSIDE>/<RUN_ID>.jsonl
+  > <REPOSITORY_OUTSIDE>/CMCP_TrackProbe_<RUN_ID>.jsonl
 ```
 
 Windows、または既存portを明示して使う場合は、localで確認した完全なport名を追加します。raw port名はlocal run recordにだけ残します。
@@ -146,7 +148,7 @@ target/release/cubase_track_probe_collector \
   --drain-timeout-ms 5000 \
   --midi-input "<FROM_CUBASE_PORT>" \
   --midi-output "<TO_CUBASE_PORT>" \
-  > <REPOSITORY_OUTSIDE>/<RUN_ID>.jsonl
+  > <REPOSITORY_OUTSIDE>/CMCP_TrackProbe_<RUN_ID>.jsonl
 ```
 
 `--run-id`にはcredential、project名、個人名、顧客名、absolute pathを含めません。collectorは観測fileを自動作成せずstdoutへ出力するため、repository内へredirectしません。primary runでは上記の1000 ms discoveryと5000 ms graceful drainを固定し、変更したrunは値と理由を記録してprimary comparisonから分離します。
@@ -225,7 +227,7 @@ targeted requestは、同じrequest IDに対する同じ`source_instance_id`か�
 
 1. 通常projectを保存して閉じ、対象Cubaseも終了した状態で、他のCubase instanceがないことを確認する。
 2. offline validationをすべて実行し、repository commitとprobe source SHA-256をlocal run recordへ記録する。
-3. 対象version用のprobe sourceを配備し、source / deployed SHA-256が完全一致することを確認する。配備先はlocal recordにだけ残す。
+3. Cubaseを終了したまま、対象Cubase製品の既存`MIDI Remote/Driver Scripts/Local`だけを`--midi-remote-root`へ指定し、`target/release/cubase_mcp --install-track-probe --midi-remote-root <LOCAL_ROOT>`でprobeを配備する。Cubase rootが0件・複数候補、root形状不正、別Steinberg製品、Cubase process検出、process確認失敗ではscriptを作成せず停止する。installerは既存pathを上書きも削除もせず、異なるprobeが存在すれば常に拒否する。必要なら既存fileを手動で退避・確認・削除してから再実行する。新規pathは`create_new`で確保し、symlinkを拒否して書込み後digestを検証する。作成後の書込み・検証・durability確認に失敗したpathは競合file保護のため自動削除せず、手動確認する。JSON reportのabsolute pathはlocalにだけ残し、repository source SHA-256、`embedded_source_sha256`、`deployed_sha256`の三者が完全一致しなければrunを開始しない。最初と作成直前のprocess checkの間にもCubaseを起動しない。
 4. repository外を出力先にし、`--run-id <RUN_ID>`付きでcollectorを先に起動する。最初の`collector_started` recordを確認し、固有IDの初期化checkpointを開始する。
 5. 初期化checkpoint内で対象Cubaseを1 instanceだけ起動してprobeを新規loadする。R1ではcollectorを動かしたまま、reload用checkpointを開始してから明示的にReload Scriptsする。
 6. 新しい`source_instance_id`から`source_seq = 1`の`probe.loaded`を受信したことを確認する。これを新しいprobe sessionの開始markerとする。続く同じsourceの`probe.mapping_active`でpage activation境界を確認する。

@@ -81,9 +81,23 @@ MIDI BridgeはCubase MIDI Remoteごとの一時instance IDを検出し、すべ�
 
 discoveryと実際のTool要求にはそれぞれ独立したtimeout期間を割り当てます。MIDI Bridgeの`--timeout-ms`は500 ms以上が必要です。応答timeoutになったinstance IDは失効し、次回はキャッシュから再選択せずdiscoveryをやり直します。MIDI受信queueがoverflowした場合も選択状態を破棄して`BUSY`を返します。要求送信前に検出した場合は状態変更を開始せず、送信後に検出した場合は結果不明として扱って次回の再discoveryを必須にします。
 
+### Track API調査用Probe
+
+`--install-track-probe`は[Track Host API実機スパイク](docs/track-api-host-spike.md)専用であり、通常利用の`CubaseMCP` scriptを置き換えません。すべてのCubase instanceを正常終了し、対象製品の既存`MIDI Remote/Driver Scripts/Local` directoryを1つだけ指定して実行します。
+
+```text
+target/release/cubase_mcp \
+  --install-track-probe \
+  --midi-remote-root "<DOCUMENTS>/Steinberg/<CUBASE_PRODUCT>/MIDI Remote/Driver Scripts/Local"
+```
+
+rootを省略できるのはCubase製品の候補がexactly 1件の場合だけです。0件または複数件では無変更で失敗し、Nuendo等の別製品rootは候補にも明示指定にも使用できません。installerは書込み前と作成直前にCubase processを確認し、検出または確認失敗時はscriptを作成せず終了します。配備先は`create_new`で作成するため既存pathを上書きせず、異なるprobeが既にある場合も常に無変更で拒否します。必要な場合は既存fileを手動で退避・確認・削除してから再実行します。作成開始後の書込み、検証、durability確認に失敗した場合は、競合fileを誤って削除しないようpathを保全してエラーを返すため、内容を手動確認します。
+
+成功時のJSON reportにはlocal absolute path、embedded / previous / deployed SHA-256が含まれるため、repositoryへcommitしません。実機run直前にcurrent HEADからrelease buildし、repository source、reportの`embedded_source_sha256`、`deployed_sha256`の三者一致を確認します。process check通過後からinstall完了までもCubaseを起動しないでください。
+
 ## ビルドとテスト
 
-Rust 2024 editionに対応するtoolchainが必要です。
+Rust 1.95以降のtoolchainが必要です（Rust 2024 edition）。
 
 ```bash
 cargo build --release

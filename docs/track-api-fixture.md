@@ -46,7 +46,7 @@ CMCP_TrackFixture_r1_<YYYYMMDD>
 
 このdirectoryと`.cpr`はlocal artifactです。Gitへ追加しないでください。Gitへcommitする結果や共有ログにはこの文書の合成Track名だけを含め、absolute path、raw MIDI device名、audio data、credentialは記録しません。原状回復にraw device名が必要なO1のpre-run inventoryだけはlocal artifactとして保持し、共有しません。
 
-repositoryの`.gitignore`はCubase projectやaudio artifactを包括的には除外しません。`.cpr`、`.bak`、`Audio/`、`Edits/`、`Images/`、autosave、raw SysEx / JSON logをstage前に手動で確認してください。
+repositoryの`.gitignore`は`CMCP_TrackFixture_*`のproject / backup、`CMCP_TrackProbe_*`のJSONL / SysEx、予約済みruntime directoryを追加防御として除外しますが、Cubase projectやaudio artifactを包括的には除外しません。`.cpr`、`.bak`、`Audio/`、`Edits/`、`Images/`、autosave、raw SysEx / JSON logをstage前に手動で確認してください。raw artifactをrepository外へ置く原則は変わりません。
 
 ## 検証matrix
 

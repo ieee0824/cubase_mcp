@@ -1,0 +1,2 @@
+# Keep reviewed and embedded Cubase script bytes identical on every platform.
+*.js text eol=lf

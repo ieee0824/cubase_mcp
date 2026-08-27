@@ -31,8 +31,8 @@ var MAX_HOST_ID_BYTES = 4096
 var MAX_HOST_ID_FRAGMENTS = 16
 var MAX_WIRE_ITEMS_PER_SNAPSHOT = 1024
 var MAX_ITEMS_PER_CHUNK = 2
-// Five 8-slot banks can each emit title, binding-title, selected, mute, and solo
-// callbacks during activation (200 records). Leave bounded headroom for an
+// Two 8-slot banks can each emit title, binding-title, selected, mute, and solo
+// callbacks during activation (80 records). Leave bounded headroom for an
 // initial DirectAccess change burst without making the queue unbounded.
 var MAX_PENDING_FEEDBACK = 512
 var MAX_FEEDBACK_PER_IDLE = 64
@@ -41,7 +41,57 @@ var MAX_PENDING_DIRECT_ACCESS_SNAPSHOTS = 16
 var MAX_DIRECT_ACCESS_NODES = 256
 var MAX_DIRECT_ACCESS_DEPTH = 32
 var MAX_DIRECT_ACCESS_CHILDREN = 128
+var MAX_OBSERVATION_EPOCH = 2147483647
 var BANK_SLOT_COUNT = 8
+
+// Only revision-2 fixture Track titles may cross the probe boundary. This is
+// deliberately an exact allowlist rather than a CMCP_ prefix check: an
+// unrelated project, Input/Output bus, or VCA can otherwise make its ambient
+// title and opaque host ID observable when a host-side filter regresses.
+var FIXTURE_TITLE_ALLOWLIST = [
+    'CMCP_E1_ONLY_AUDIO',
+    'CMCP_E8_01',
+    'CMCP_E8_02',
+    'CMCP_E8_03',
+    'CMCP_E8_04',
+    'CMCP_E8_05',
+    'CMCP_E8_06',
+    'CMCP_E8_07',
+    'CMCP_E8_08',
+    'CMCP_01_FOLDER_EMPTY',
+    'CMCP_DUPLICATE',
+    'CMCP_04_MIDI_ASCII',
+    'CMCP_05_日本語_é_🎹',
+    'CMCP_05_日本語_e\u0301_🎹',
+    'CMCP_06_GROUP',
+    'CMCP_07_FX',
+    'CMCP_08_HIDDEN',
+    'CMCP_10_MUTATE_RENAME',
+    'CMCP_11_MUTATE_DELETE',
+    'CMCP_12_MUTATION_ANCHOR',
+    'CMCP_13_STATE_S0_M0_SO0',
+    'CMCP_14_STATE_S0_M0_SO1',
+    'CMCP_15_STATE_S0_M1_SO0',
+    'CMCP_16_STATE_S0_M1_SO1',
+    'CMCP_17_STATE_S1_M0_SO0',
+    'CMCP_18_STATE_S1_M0_SO1',
+    'CMCP_19_STATE_S1_M1_SO0',
+    'CMCP_20_STATE_S1_M1_SO1',
+    'CMCP_10_RENAMED_変更後',
+    'CMCP_21_ADDED'
+]
+var FIXTURE_P09_TITLE =
+    'CMCP_09_LONG_ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNO'
+var FIXTURE_P09_PREFIX = 'CMCP_09_LONG_'
+var SAFE_DIRECT_ACCESS_TYPE_NAMES = [
+    'MixConsole',
+    'AudioChannel',
+    'MIDIChannel',
+    'InstrumentChannel',
+    'GroupChannel',
+    'FXChannel',
+    'FolderTrack'
+]
 
 var activeDeviceRef = null
 var activeMappingRef = null
@@ -54,6 +104,7 @@ var activationInitializationPending = false
 var probeIntegrityFailed = false
 var sourceSequence = 0
 var observationSequence = 0
+var observationEpoch = 0
 var snapshotSequence = 0
 var probeInstanceId = createInstanceId()
 
@@ -64,15 +115,13 @@ var pendingDirectAccessSnapshots = []
 
 var bankConfigs = [
     makeCoreBankConfig('MB_CORE_ALL', false),
-    makeCoreBankConfig('MB_CORE_VISIBLE', true),
-    makeOptionalBankConfig('MB_OPTIONAL_MAIN', 'main'),
-    makeOptionalBankConfig('MB_OPTIONAL_LEFT', 'left'),
-    makeOptionalBankConfig('MB_OPTIONAL_RIGHT', 'right')
+    makeCoreBankConfig('MB_CORE_VISIBLE', true)
 ]
 
 var directAccess = null
 var directAccessActive = false
 var directAccessActivationError = null
+var directAccessUpdateInProgress = false
 var directAccessCapabilities = makeDirectAccess()
 
 deviceDriver.mOnActivate = function (activeDevice) {
@@ -135,7 +184,12 @@ page.mOnIdle = function (activeDevice, activeMapping) {
     flushFeedback(activeDevice)
     if (!feedbackIsPending()) {
         flushOneBankSnapshot(activeDevice, activeMapping)
-        flushOneDirectAccessSnapshot(activeDevice, activeMapping)
+        // Activation queues both Mixer Bank projections before DirectAccess.
+        // Drain that bank batch first so it cannot become
+        // ALL, DirectAccess, VISIBLE.
+        if (pendingBankSnapshots.length === 0) {
+            flushOneDirectAccessSnapshot(activeDevice, activeMapping)
+        }
     }
     maybeFinishActivation(activeDevice)
 }
@@ -183,7 +237,7 @@ midiInput.mOnSysex = function (activeDevice, midiMessage) {
             activeDevice,
             request.id,
             'INTERNAL_ERROR',
-            safeErrorMessage(error)
+            'Unhandled probe request failure'
         )
     }
 }
@@ -209,47 +263,6 @@ function makeCoreBankConfig(configId, followVisibility) {
     zone.setFollowVisibility(followVisibility)
 
     return finishBankConfig(configId, followVisibility, explicitMainFilter, zone)
-}
-
-function makeOptionalBankConfig(configId, windowZone) {
-    var zone = mixConsole.makeMixerBankZone(configId)
-
-    zone.excludeAudioChannels()
-    zone.excludeInstrumentChannels()
-    zone.excludeSamplerChannels()
-    zone.excludeMIDIChannels()
-    zone.excludeGroupChannels()
-    zone.excludeFXChannels()
-    zone.includeVCAChannels()
-    zone.includeInputChannels()
-    zone.includeOutputChannels()
-
-    var explicitMainFilter = false
-    if (windowZone === 'main') {
-        zone.excludeWindowZoneLeftChannels()
-        zone.excludeWindowZoneRightChannels()
-        explicitMainFilter = typeof zone.includeWindowZoneMainChannels === 'function'
-        if (explicitMainFilter) {
-            zone.includeWindowZoneMainChannels()
-        }
-    } else if (windowZone === 'left') {
-        zone.includeWindowZoneLeftChannels()
-        zone.excludeWindowZoneRightChannels()
-        explicitMainFilter = typeof zone.excludeWindowZoneMainChannels === 'function'
-        if (explicitMainFilter) {
-            zone.excludeWindowZoneMainChannels()
-        }
-    } else {
-        zone.includeWindowZoneRightChannels()
-        zone.excludeWindowZoneLeftChannels()
-        explicitMainFilter = typeof zone.excludeWindowZoneMainChannels === 'function'
-        if (explicitMainFilter) {
-            zone.excludeWindowZoneMainChannels()
-        }
-    }
-    zone.setFollowVisibility(false)
-
-    return finishBankConfig(configId, false, explicitMainFilter, zone)
 }
 
 function finishBankConfig(configId, followVisibility, explicitMainFilter, zone) {
@@ -288,10 +301,13 @@ function makeBankSlot(config, slotIndex) {
         solo_feedback: soloFeedback,
         state: {
             title: null,
+            title_redacted: false,
+            title_authorized: false,
             selected: null,
             mute: null,
             solo: null,
             unique_id: null,
+            unique_id_observation_status: 'not_observed',
             observed_generation: {
                 title: -1,
                 selected: -1,
@@ -305,12 +321,19 @@ function makeBankSlot(config, slotIndex) {
                 mute: null,
                 solo: null,
                 unique_id: null
+            },
+            last_observation_epoch: {
+                title: null,
+                selected: null,
+                mute: null,
+                solo: null,
+                unique_id: null
             }
         }
     }
 
     channel.mOnTitleChange = function (activeDevice, activeMapping, title) {
-        slot.state.title = sanitizeNullableString(title)
+        applyBankTitlePolicy(slot, title)
         slot.state.observed_generation.title = config.generation
         refreshBankUniqueId(config, slot, activeMapping)
         recordBankFeedback(
@@ -326,7 +349,7 @@ function makeBankSlot(config, slotIndex) {
     // Keeping both paths visible is intentional: the host spike records which
     // callback path survives bank moves and empty slots on each Cubase build.
     selectedFeedback.mOnTitleChange = function (activeDevice, objectTitle, valueTitle) {
-        slot.state.title = sanitizeNullableString(objectTitle)
+        applyBankTitlePolicy(slot, objectTitle)
         slot.state.observed_generation.title = config.generation
         refreshBankUniqueId(config, slot, activeMappingRef)
         recordBankFeedback(
@@ -365,6 +388,21 @@ function makeBankSlot(config, slotIndex) {
     return slot
 }
 
+function applyBankTitlePolicy(slot, value) {
+    slot.state.title = null
+    slot.state.title_redacted = false
+    slot.state.title_authorized = false
+    if (typeof value !== 'string' || value.length === 0) {
+        return
+    }
+    if (fixtureTitleIsAllowed(value)) {
+        slot.state.title = value
+        slot.state.title_authorized = true
+        return
+    }
+    slot.state.title_redacted = true
+}
+
 function feedbackBoolean(value) {
     if (typeof value !== 'number' || !isFinite(value)) {
         return null
@@ -373,12 +411,24 @@ function feedbackBoolean(value) {
 }
 
 function refreshBankUniqueId(config, slot, activeMapping) {
+    if (!slot.state.title_authorized) {
+        slot.state.unique_id = null
+        slot.state.unique_id_observation_status = 'title_not_authorized'
+        slot.state.observed_generation.unique_id = -1
+        return
+    }
+    if (activeMapping === null) {
+        slot.state.unique_id = null
+        slot.state.unique_id_observation_status = 'mapping_unavailable'
+        slot.state.observed_generation.unique_id = -1
+        return
+    }
     if (
-        activeMapping === null ||
         !slot.channel ||
         typeof slot.channel.getUniqueIDString !== 'function'
     ) {
         slot.state.unique_id = null
+        slot.state.unique_id_observation_status = 'getter_unavailable'
         slot.state.observed_generation.unique_id = -1
         return
     }
@@ -386,13 +436,17 @@ function refreshBankUniqueId(config, slot, activeMapping) {
         var value = slot.channel.getUniqueIDString(activeMapping)
         if (typeof value === 'string') {
             slot.state.unique_id = value
+            slot.state.unique_id_observation_status =
+                'observed_with_title_callback'
             slot.state.observed_generation.unique_id = config.generation
         } else {
             slot.state.unique_id = null
+            slot.state.unique_id_observation_status = 'invalid_type'
             slot.state.observed_generation.unique_id = -1
         }
     } catch (error) {
         slot.state.unique_id = null
+        slot.state.unique_id_observation_status = 'getter_failed'
         slot.state.observed_generation.unique_id = -1
     }
 }
@@ -411,12 +465,30 @@ function recordBankFeedback(config, slot, field, value, callbackSource) {
         return
     }
 
+    var callbackEpoch = observationEpoch
     ++observationSequence
     slot.state.last_observation_seq[field] = observationSequence
+    slot.state.last_observation_epoch[field] = callbackEpoch
+    if (field === 'title') {
+        slot.state.last_observation_seq.unique_id =
+            slot.state.unique_id_observation_status ===
+            'observed_with_title_callback'
+                ? observationSequence
+                : null
+        slot.state.last_observation_epoch.unique_id =
+            slot.state.unique_id_observation_status ===
+            'observed_with_title_callback'
+                ? callbackEpoch
+                : null
+    }
     var item = bankSlotItem(config, slot)
     item.observation_seq = observationSequence
+    item.observation_epoch = callbackEpoch
+    item.observation_epoch_status = 'callback_observed'
     item.changed_field = field
-    item.changed_value = value
+    item.changed_value = field === 'title' ? item.title : value
+    item.changed_value_redacted =
+        field === 'title' && item.title_redacted
     item.callback_source = callbackSource
 
     enqueueFeedback('mixer_bank_feedback', 'probe.bank.chunk', item)
@@ -425,16 +497,34 @@ function recordBankFeedback(config, slot, field, value, callbackSource) {
 function bankSlotItem(config, slot) {
     var observed = slot.state.observed_generation
     var generation = config.generation
+    var titleWasObserved = observed.title === generation
+    var titleRedacted = titleWasObserved && slot.state.title_redacted
+    var hostIdRedacted =
+        titleRedacted &&
+        slot.channel &&
+        typeof slot.channel.getUniqueIDString === 'function'
     return {
         record_kind: 'observation',
         config_id: config.id,
         bank_generation: generation,
         slot_index: slot.index,
-        title: observed.title === generation ? slot.state.title : null,
+        title: titleWasObserved ? slot.state.title : null,
+        title_redacted: titleRedacted,
         selected: observed.selected === generation ? slot.state.selected : null,
         mute: observed.mute === generation ? slot.state.mute : null,
         solo: observed.solo === generation ? slot.state.solo : null,
         host_id_raw: observed.unique_id === generation ? slot.state.unique_id : null,
+        host_id_redacted: hostIdRedacted,
+        host_id_observed_with_title_callback:
+            observed.unique_id === generation &&
+            slot.state.unique_id_observation_status ===
+                'observed_with_title_callback',
+        host_id_observation_status:
+            titleWasObserved
+                ? slot.state.unique_id_observation_status
+                : 'not_observed',
+        redacted_string_count:
+            (titleRedacted ? 1 : 0) + (hostIdRedacted ? 1 : 0),
         field_observation_generation: {
             title: observed.title,
             selected: observed.selected,
@@ -448,6 +538,13 @@ function bankSlotItem(config, slot) {
             mute: slot.state.last_observation_seq.mute,
             solo: slot.state.last_observation_seq.solo,
             host_id_raw: slot.state.last_observation_seq.unique_id
+        },
+        field_last_observation_epoch: {
+            title: slot.state.last_observation_epoch.title,
+            selected: slot.state.last_observation_epoch.selected,
+            mute: slot.state.last_observation_epoch.mute,
+            solo: slot.state.last_observation_epoch.solo,
+            host_id_raw: slot.state.last_observation_epoch.unique_id
         }
     }
 }
@@ -457,10 +554,13 @@ function beginBankGeneration(config) {
     for (var index = 0; index < config.slots.length; ++index) {
         var state = config.slots[index].state
         state.title = null
+        state.title_redacted = false
+        state.title_authorized = false
         state.selected = null
         state.mute = null
         state.solo = null
         state.unique_id = null
+        state.unique_id_observation_status = 'not_observed'
     }
 }
 
@@ -616,7 +716,6 @@ function flushOneBankSnapshot(activeDevice, activeMapping) {
     var items = []
     for (var index = 0; index < config.slots.length; ++index) {
         var slot = config.slots[index]
-        refreshBankUniqueId(config, slot, activeMapping)
         items.push(bankSlotItem(config, slot))
     }
 
@@ -657,7 +756,7 @@ function makeDirectAccess() {
         mixer_visibility_v1_2: false,
         mixer_index_v1_2: false,
         mixer_zone_v1_2: false,
-        reason: 'makeDirectAccess is not available'
+        reason: 'make_direct_access_unavailable'
     }
 
     if (typeof page.mHostAccess.makeDirectAccess !== 'function') {
@@ -668,7 +767,7 @@ function makeDirectAccess() {
     try {
         candidate = page.mHostAccess.makeDirectAccess(mixConsole)
     } catch (error) {
-        capabilities.reason = safeErrorMessage(error)
+        capabilities.reason = 'make_direct_access_failed'
         return capabilities
     }
 
@@ -681,7 +780,7 @@ function makeDirectAccess() {
         typeof candidate.getNumberOfChildObjects !== 'function' ||
         typeof candidate.getChildObjectID !== 'function'
     ) {
-        capabilities.reason = 'DirectAccess core methods are incomplete'
+        capabilities.reason = 'core_methods_incomplete'
         return capabilities
     }
 
@@ -705,11 +804,15 @@ function makeDirectAccess() {
 
     candidate.mOnObjectChange = function (activeDevice, activeMapping, objectId) {
         recordDirectAccessChange('object_change', objectId, null)
-        scheduleDirectAccessSnapshotOnce('object_change')
+        if (!directAccessUpdateInProgress) {
+            scheduleDirectAccessSnapshotOnce('object_change')
+        }
     }
     candidate.mOnObjectWillBeRemoved = function (activeDevice, activeMapping, objectId) {
         recordDirectAccessChange('object_will_be_removed', objectId, null)
-        scheduleDirectAccessSnapshotOnce('object_will_be_removed')
+        if (!directAccessUpdateInProgress) {
+            scheduleDirectAccessSnapshotOnce('object_will_be_removed')
+        }
     }
     candidate.mOnParameterChange = function (
         activeDevice,
@@ -718,7 +821,9 @@ function makeDirectAccess() {
         parameterTag
     ) {
         recordDirectAccessChange('parameter_change', objectId, parameterTag)
-        scheduleDirectAccessSnapshotOnce('parameter_change')
+        if (!directAccessUpdateInProgress) {
+            scheduleDirectAccessSnapshotOnce('parameter_change')
+        }
     }
 
     return capabilities
@@ -737,10 +842,10 @@ function activateDirectAccess(activeDevice, activeMapping) {
     } catch (error) {
         directAccessActive = false
         directAccessCapabilities.active = false
-        directAccessActivationError = safeErrorMessage(error)
+        directAccessActivationError = 'activate_failed'
         sendEvent(activeDevice, 'probe.direct_access.error', {
             operation: 'activate',
-            message: directAccessActivationError
+            error_code: directAccessActivationError
         })
     }
 }
@@ -755,7 +860,7 @@ function deactivateDirectAccess(activeDevice, activeMapping) {
     } catch (error) {
         sendOverflow(activeDevice, {
             stream: 'direct_access_deactivate',
-            message: safeErrorMessage(error)
+            error_code: 'deactivate_failed'
         })
     }
     directAccessActive = false
@@ -776,9 +881,12 @@ function recordDirectAccessChange(kind, objectId, parameterTag) {
         return
     }
 
+    var callbackEpoch = observationEpoch
     ++observationSequence
     var item = {
         observation_seq: observationSequence,
+        observation_epoch: callbackEpoch,
+        observation_epoch_status: 'callback_observed',
         change: kind,
         object_id: validNumberOrNull(objectId),
         parameter_tag: validNumberOrNull(parameterTag)
@@ -883,17 +991,20 @@ function flushOneDirectAccessSnapshot(activeDevice, activeMapping) {
     var pending = pendingDirectAccessSnapshots[0]
     if (!pending.updated) {
         pending.updated = true
+        directAccessUpdateInProgress = true
         try {
             directAccess.update(activeMapping)
         } catch (error) {
+            directAccessUpdateInProgress = false
             pendingDirectAccessSnapshots.shift()
             sendOverflow(activeDevice, {
                 stream: 'direct_access_update',
                 attempted_reason: pending.reason,
-                message: safeErrorMessage(error)
+                error_code: 'update_failed'
             })
             return
         }
+        directAccessUpdateInProgress = false
     }
 
     if (feedbackIsPending()) {
@@ -911,6 +1022,8 @@ function flushOneDirectAccessSnapshot(activeDevice, activeMapping) {
         result.truncated,
         {
             base_object_id: result.base_object_id,
+            observation_epoch: result.observation_epoch,
+            observation_epoch_status: result.observation_epoch_status,
             cycle_count: result.cycle_count,
             error_count: result.error_count,
             truncation_reasons: result.truncation_reasons
@@ -919,9 +1032,12 @@ function flushOneDirectAccessSnapshot(activeDevice, activeMapping) {
 }
 
 function collectDirectAccess(activeMapping) {
+    var snapshotEpoch = observationEpoch
     var result = {
         base_object_id: null,
         items: [],
+        observation_epoch: snapshotEpoch,
+        observation_epoch_status: 'snapshot_observed',
         cycle_count: 0,
         error_count: 0,
         truncated: false,
@@ -960,7 +1076,7 @@ function collectDirectAccess(activeMapping) {
         }
         visited[key] = true
 
-        var item = readDirectAccessObject(activeMapping, entry)
+        var item = readDirectAccessObject(activeMapping, entry, snapshotEpoch)
         result.error_count += item.metadata_error_count
         result.items.push(item)
 
@@ -979,7 +1095,7 @@ function collectDirectAccess(activeMapping) {
         } catch (error) {
             ++result.error_count
             item.child_count = null
-            item.child_enumeration_error = safeErrorMessage(error)
+            item.child_enumeration_error = 'get_number_of_child_objects_failed'
             result.truncated = true
             addUniqueReason(result.truncation_reasons, 'child_count_failed')
             continue
@@ -988,7 +1104,7 @@ function collectDirectAccess(activeMapping) {
         if (!validNonnegativeInteger(childCount)) {
             ++result.error_count
             item.child_count = null
-            item.child_enumeration_error = 'invalid child count'
+            item.child_enumeration_error = 'invalid_child_count'
             result.truncated = true
             addUniqueReason(result.truncation_reasons, 'invalid_child_count')
             continue
@@ -1039,33 +1155,49 @@ function collectDirectAccess(activeMapping) {
     return result
 }
 
-function readDirectAccessObject(activeMapping, entry) {
+function readDirectAccessObject(activeMapping, entry, snapshotEpoch) {
     var errors = []
-    var item = {
-        record_kind: 'observation',
-        object_id: entry.object_id,
-        parent_id: entry.parent_id,
-        depth: entry.depth,
-        child_index: entry.child_index,
-        unique_name: readDirectAccessString(
-            'getObjectUniqueName',
-            activeMapping,
-            entry.object_id,
-            errors
-        ),
-        host_id_raw: readDirectAccessOpaqueId(
+    var titleResult = readDirectAccessStringResult(
+        'getObjectTitle',
+        activeMapping,
+        entry.object_id,
+        errors
+    )
+    var titleAllowed =
+        titleResult.value !== null && fixtureTitleIsAllowed(titleResult.value)
+    var hostId = null
+    if (titleAllowed) {
+        hostId = readDirectAccessOpaqueId(
             'getObjectUniqueIDString',
             activeMapping,
             entry.object_id,
             errors
-        ),
-        title: readDirectAccessString(
-            'getObjectTitle',
-            activeMapping,
-            entry.object_id,
-            errors
-        ),
+        )
+    }
+    var uniqueNameAvailable =
+        typeof directAccess.getObjectUniqueName === 'function'
+    var uniqueNameRedacted = uniqueNameAvailable
+    var titleRedacted = titleResult.value !== null && !titleAllowed
+    var hostIdRedacted =
+        titleRedacted && typeof directAccess.getObjectUniqueIDString === 'function'
+    var item = {
+        record_kind: 'observation',
+        observation_epoch: snapshotEpoch,
+        observation_epoch_status: 'snapshot_observed',
+        object_id: entry.object_id,
+        parent_id: entry.parent_id,
+        depth: entry.depth,
+        child_index: entry.child_index,
+        unique_name: null,
+        unique_name_redacted: uniqueNameRedacted,
+        unique_name_status:
+            uniqueNameAvailable ? 'not_invoked_by_policy' : 'not_available',
+        host_id_raw: hostId,
+        host_id_redacted: hostIdRedacted,
+        title: titleAllowed ? titleResult.value : null,
+        title_redacted: titleRedacted,
         type_name: null,
+        type_name_redacted: false,
         mixer_visible: readDirectAccessBoolean(
             'isMixerChannelVisible',
             activeMapping,
@@ -1087,39 +1219,55 @@ function readDirectAccessObject(activeMapping, entry) {
         child_count: null,
         child_enumeration_error: null,
         metadata_error_count: 0,
-        metadata_errors: []
+        metadata_errors: [],
+        redacted_string_count: 0
     }
 
     // getObjectTypeName is API v1.3. Do not treat it as part of the v1.2
     // DirectAccess metadata baseline.
     if (directAccessCapabilities.get_object_type_name_v1_3) {
-        item.type_name = readDirectAccessString(
+        var typeResult = readDirectAccessStringResult(
             'getObjectTypeName',
             activeMapping,
             entry.object_id,
             errors
         )
+        if (
+            typeResult.value !== null &&
+            safeDirectAccessTypeName(typeResult.value)
+        ) {
+            item.type_name = typeResult.value
+        } else if (typeResult.value !== null) {
+            item.type_name_redacted = true
+        }
     }
 
+    item.redacted_string_count =
+        (item.unique_name_redacted ? 1 : 0) +
+        (item.host_id_redacted ? 1 : 0) +
+        (item.title_redacted ? 1 : 0) +
+        (item.type_name_redacted ? 1 : 0)
     item.metadata_error_count = errors.length
     item.metadata_errors = errors
     return item
 }
 
-function readDirectAccessString(methodName, activeMapping, objectId, errors) {
+function readDirectAccessStringResult(methodName, activeMapping, objectId, errors) {
+    var result = { value: null }
     if (typeof directAccess[methodName] !== 'function') {
-        return null
+        return result
     }
     try {
         var value = directAccess[methodName](activeMapping, objectId)
         if (typeof value !== 'string') {
-            errors.push(methodName + ': invalid string')
-            return null
+            errors.push(methodName + '_invalid_string')
+            return result
         }
-        return sanitizeString(value)
+        result.value = value
+        return result
     } catch (error) {
-        errors.push(methodName + ': ' + safeErrorMessage(error))
-        return null
+        errors.push(methodName + '_failed')
+        return result
     }
 }
 
@@ -1130,12 +1278,12 @@ function readDirectAccessOpaqueId(methodName, activeMapping, objectId, errors) {
     try {
         var value = directAccess[methodName](activeMapping, objectId)
         if (typeof value !== 'string') {
-            errors.push(methodName + ': invalid string')
+            errors.push(methodName + '_invalid_string')
             return null
         }
         return value
     } catch (error) {
-        errors.push(methodName + ': ' + safeErrorMessage(error))
+        errors.push(methodName + '_failed')
         return null
     }
 }
@@ -1147,12 +1295,12 @@ function readDirectAccessBoolean(methodName, activeMapping, objectId, errors) {
     try {
         var value = directAccess[methodName](activeMapping, objectId)
         if (typeof value !== 'boolean') {
-            errors.push(methodName + ': invalid boolean')
+            errors.push(methodName + '_invalid_boolean')
             return null
         }
         return value
     } catch (error) {
-        errors.push(methodName + ': ' + safeErrorMessage(error))
+        errors.push(methodName + '_failed')
         return null
     }
 }
@@ -1164,14 +1312,39 @@ function readDirectAccessNumber(methodName, activeMapping, objectId, errors) {
     try {
         var value = directAccess[methodName](activeMapping, objectId)
         if (typeof value !== 'number' || !isFinite(value)) {
-            errors.push(methodName + ': invalid number')
+            errors.push(methodName + '_invalid_number')
             return null
         }
         return value
     } catch (error) {
-        errors.push(methodName + ': ' + safeErrorMessage(error))
+        errors.push(methodName + '_failed')
         return null
     }
+}
+
+function fixtureTitleIsAllowed(value) {
+    if (typeof value !== 'string' || value.length === 0) {
+        return false
+    }
+    for (var index = 0; index < FIXTURE_TITLE_ALLOWLIST.length; ++index) {
+        if (FIXTURE_TITLE_ALLOWLIST[index] === value) {
+            return true
+        }
+    }
+    return (
+        value.length >= FIXTURE_P09_PREFIX.length &&
+        value.indexOf(FIXTURE_P09_PREFIX) === 0 &&
+        FIXTURE_P09_TITLE.indexOf(value) === 0
+    )
+}
+
+function safeDirectAccessTypeName(value) {
+    for (var index = 0; index < SAFE_DIRECT_ACCESS_TYPE_NAMES.length; ++index) {
+        if (SAFE_DIRECT_ACCESS_TYPE_NAMES[index] === value) {
+            return true
+        }
+    }
+    return false
 }
 
 function addUniqueReason(reasons, reason) {
@@ -1224,6 +1397,11 @@ function handleRequest(activeDevice, request) {
         return
     }
 
+    if (request.method === 'probe.observation.cut') {
+        handleObservationCut(activeDevice, request)
+        return
+    }
+
     if (
         request.method === 'probe.bank.reset' ||
         request.method === 'probe.bank.next' ||
@@ -1263,6 +1441,41 @@ function handleRequest(activeDevice, request) {
     sendError(activeDevice, request.id, 'NOT_SUPPORTED', 'Unknown probe method')
 }
 
+function handleObservationCut(activeDevice, request) {
+    if (!objectHasNoOwnProperties(request.params)) {
+        sendError(
+            activeDevice,
+            request.id,
+            'INVALID_ARGUMENT',
+            'observation cut params must be empty'
+        )
+        return
+    }
+    if (
+        !validNonnegativeInteger(observationEpoch) ||
+        observationEpoch >= MAX_OBSERVATION_EPOCH
+    ) {
+        sendOverflow(activeDevice, {
+            stream: 'observation_epoch',
+            error_code: 'epoch_exhausted',
+            observation_epoch: validNumberOrNull(observationEpoch),
+            max_observation_epoch: MAX_OBSERVATION_EPOCH,
+            rollover_policy: 'reload_required'
+        })
+        sendError(
+            activeDevice,
+            request.id,
+            'PROTOCOL_ERROR',
+            'Observation epoch exhausted; reload required'
+        )
+        return
+    }
+    ++observationEpoch
+    sendResponse(activeDevice, request.id, {
+        observation_epoch: observationEpoch
+    })
+}
+
 function handleBankAction(activeDevice, request) {
     var config = requestConfig(request)
     if (config === null) {
@@ -1300,7 +1513,7 @@ function handleBankAction(activeDevice, request) {
             stream: 'bank_action',
             config_id: config.id,
             action: actionName,
-            message: safeErrorMessage(error)
+            error_code: 'bank_action_failed'
         })
         sendError(activeDevice, request.id, 'INTERNAL_ERROR', 'Bank action failed; reload required')
         return
@@ -1343,6 +1556,21 @@ function capabilityData() {
         read_only: true,
         integrity_failed: probeIntegrityFailed,
         host_version: getHostVersion(),
+        data_minimization: {
+            source_redaction: true,
+            fixture_revision: 2,
+            unknown_titles: 'redacted',
+            unknown_host_ids: 'omitted',
+            unique_name_policy: 'not_invoked',
+            exception_text: 'fixed_codes'
+        },
+        observation_epoch: {
+            supported: true,
+            version: 1,
+            current: observationEpoch,
+            max: MAX_OBSERVATION_EPOCH,
+            rollover_policy: 'reload_required'
+        },
         mixer_bank: {
             supported: true,
             slot_count: BANK_SLOT_COUNT,
@@ -1446,6 +1674,7 @@ function deactivatePage(activeDevice, activeMapping) {
     pendingDroppedFeedback = makeDroppedFeedbackState()
     pendingBankSnapshots = []
     pendingDirectAccessSnapshots = []
+    directAccessUpdateInProgress = false
 }
 
 function sendChunkedEvent(
@@ -2018,13 +2247,6 @@ function sanitizeString(value) {
     return result
 }
 
-function safeErrorMessage(error) {
-    if (error && error.message) {
-        return sanitizeString(String(error.message))
-    }
-    return sanitizeString(String(error))
-}
-
 function validNumberOrNull(value) {
     if (typeof value === 'number' && isFinite(value)) {
         return value
@@ -2048,6 +2270,15 @@ function validObjectId(value) {
 
 function objectIsArray(value) {
     return Object.prototype.toString.call(value) === '[object Array]'
+}
+
+function objectHasNoOwnProperties(value) {
+    for (var key in value) {
+        if (Object.prototype.hasOwnProperty.call(value, key)) {
+            return false
+        }
+    }
+    return true
 }
 
 function copyOwnProperties(target, source) {

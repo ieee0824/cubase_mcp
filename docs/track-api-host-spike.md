@@ -1,10 +1,10 @@
 # Track Host API実機スパイク結果
 
-この文書は[Issue #3](https://github.com/ieee0824/cubase_mcp/issues/3)の調査記録です。[Track API実機検証fixture](track-api-fixture.md) revision 1を使い、CubaseのMixer BankとDirectAccessでTrack列挙に必要な情報を安全かつ完全に取得できるかを比較します。ここでの観測結果を[Issue #4](https://github.com/ieee0824/cubase_mcp/issues/4)の方式・対応version決定と[Issue #5](https://github.com/ieee0824/cubase_mcp/issues/5)のDTO / ID / pagination契約へ入力します。
+この文書は[Issue #3](https://github.com/ieee0824/cubase_mcp/issues/3)の調査記録です。[Track API実機検証fixture](track-api-fixture.md) revision 2を使い、CubaseのMixer BankとDirectAccessでTrack列挙に必要な情報を安全かつ完全に取得できるかを比較します。ここでの観測結果を[Issue #4](https://github.com/ieee0824/cubase_mcp/issues/4)の方式・対応version決定と[Issue #5](https://github.com/ieee0824/cubase_mcp/issues/5)のDTO / ID / pagination契約へ入力します。revision 1のfixtureまたはrun artifactをrevision 2の証拠として再利用しません。
 
 文書状態: `PENDING_RUNTIME`
 
-このrevisionではread-onlyの静的preflightと、実機観測用Probe / collectorのoffline実装だけが完了しています。Cubaseを使うruntime runはまだ実施していません。したがって、観測欄の`PENDING`は成功、対応、非対応のいずれも意味しません。runtime表、比較、最終推奨、完了checklistが埋まるまでIssue #3をcloseしません。
+このrevisionではread-onlyの静的preflightと、実機観測用Probe / collector / fail-closed auditorのoffline実装だけが完了しています。Cubaseを使うruntime runはまだ実施していません。したがって、観測欄の`PENDING`は成功、対応、非対応のいずれも意味しません。runtime表、比較、最終推奨、完了checklistが埋まるまでIssue #3をcloseしません。
 
 ## 結果class
 
@@ -41,7 +41,7 @@
 | Cubase 15 | 15.0.30.287 | `STATIC_CONFIRMED` | `PENDING` |
 | Cubase 15 MIDI Remote API | v1.3。公式release indexではv1.3は15.0.20から | `STATIC_CONFIRMED` | `PENDING` |
 
-Cubase edition、runtimeが実際にloadしたAPI、run日時、About画面の完全な表示、repository commit、probe source / deployed SHA-256は各runで`PENDING`から置換します。13.0.50は未installなので、Cubase 15のrunを「13.0.50確認済み」として扱いません。
+Cubase edition、runtimeが実際にloadしたAPI、run日時、About画面の完全な表示、repository commit、probe source / installer embedded / deployedとcollector binaryのSHA-256は各runで`PENDING`から置換します。13.0.50は未installなので、Cubase 15のrunを「13.0.50確認済み」として扱いません。
 
 ### Cubase 13.0.30 / API v1.1の静的surface
 
@@ -67,7 +67,8 @@ Cubase edition、runtimeが実際にloadしたAPI、run日時、About画面の�
 | MixerBankChannel / SelectedTrackChannelのunique ID getter | 存在 | `PENDING` | rename、project切替、reload、restartをまたぐ寿命を保証しない |
 | DirectAccess activate / update / deactivate | 存在 | `PENDING` | lifecycle中のready条件を保証しない |
 | base object、child count、child object IDによるtree走査 | 存在 | `PENDING` | Project Track全体を重複・欠落なく返すことを保証しない |
-| object unique name / unique ID / title | 存在 | `PENDING` | 各値の必須性、長さ、寿命を保証しない |
+| object unique name getter | 存在 | `NOT_INVOKED_PRIVACY` | ambient host文字列をraw化しないためruntime値・例外・寿命は意図的に未観測 |
+| object unique ID / title | 存在 | `PENDING_FIXTURE_SCOPE` | allowlist済みfixture node以外のraw値は収集せず、各値の必須性、長さ、寿命を一般化しない |
 | mixer visibility / index / zone | 存在 | `PENDING` | Project順やhidden Trackのinclusionを保証しない |
 | object change / removal callback | 存在 | `PENDING` | add / rename / deleteの順序や完全性を保証しない |
 | `getObjectTypeName` | 存在 | `PENDING` | API v1.2でもtypeを取得できる証拠にはならない |
@@ -89,9 +90,9 @@ runtime runはfixtureの[安全条件](track-api-fixture.md#安全条件)と[Run
 1. 編集中の通常projectを保存して閉じ、Cubaseは対象versionを1 instanceだけ起動する。
 2. versionごとに専用の空projectからfixtureを作り、新しいCubaseで保存した`.cpr`を古いCubaseへ使い回さない。
 3. playback / record、Record Enable、Monitor、Automation Write、audio / MIDI / video import、event / part作成を行わない。
-4. mutationはM1 copy、Input / Output / VCAはO1 copyだけで実施し、C1 baselineを上書きしない。
-5. O1のbus inventoryはlocalだけに保持し、終了時に完全一致しなければ`RESTORE_FAILED`として通常projectを開かない。
-6. repository commit、probe source、deployed probeのdigestを照合し、不一致ならrunを開始しない。
+4. mutationはM1 copyでだけ実施し、C1 baselineを上書きしない。Input / Output / VCAを変更するO1は通常runと別に明示的な実施許可を得た場合だけO1 copyで実施する。
+5. audit v1 / primary ProbeではO1を実施せず、`skipped / not_separately_authorized`とする。将来の別profileで実施する場合もbus inventoryはlocalだけに保持し、終了時に完全一致しなければ`RESTORE_FAILED`として通常projectを開かない。
+6. repository commit、probe source、installer embedded source、deployed probeのdigestを照合し、3つが一致しなければrunを開始しない。実行するcollector release binaryのSHA-256も別に固定する。
 7. raw log、`.cpr`、autosave、audio、MIDI、SysEx、absolute path、raw device名、credential、raw host IDをcommitしない。
 8. committed resultに記録するTrack名はfixtureの合成名だけとし、host IDはrun-local alias、byte length、必要な場合だけSHA-256 digestで表現する。
 
@@ -110,13 +111,20 @@ Probe / collectorのrepository内artifactとoffline commandは次で固定しま
 | collector test | `cargo test --all-targets --locked` | 確定 |
 | collector build | `cargo build --release --locked` | 確定 |
 | collector binary | `target/release/cubase_track_probe_collector`（Windowsは`.exe`） | 確定 |
+| auditor source | `src/bin/cubase_track_probe_audit.rs` | 確定 |
+| auditor test | `cargo test --bin cubase_track_probe_audit --locked` | 確定 |
+| auditor binary | `target/release/cubase_track_probe_audit`（Windowsは`.exe`） | 確定 |
+| auditor interface | `--manifest <FILE> --jsonl <FILE>`、sanitized JSON stdout | 確定 |
 | probe installer | `target/release/cubase_mcp --install-track-probe --midi-remote-root <LOCAL_ROOT>`（Windowsは`.exe`） | 確定 |
 | collector output format | flushed JSON Lines、`record_format_version = 1` | 確定 |
 | deployed probe location | repository外のlocal Cubase MIDI Remote script directory | `PENDING_RUNTIME` |
 | source SHA-256 | run開始時にrepository sourceから取得 | `PENDING_RUNTIME` |
 | installer embedded SHA-256 | current HEADからbuildしたinstaller JSON reportから取得 | `PENDING_RUNTIME` |
 | deployed SHA-256 | run開始時に配備済みsourceから取得 | `PENDING_RUNTIME` |
+| collector binary SHA-256 | run開始時に実行するrelease binaryから取得 | `PENDING_RUNTIME` |
 | repository commit | run開始時の40桁commit SHA | `PENDING_RUNTIME` |
+
+Track Probeはcollectorへ渡す前にsource-side data minimizationを行います。revision 2の固定fixture allowlistへ一致するtitleと、それに属するopaque host IDだけをraw frameへ許可し、それ以外のbank / DirectAccess nodeはtitleとhost IDを`null`へして明示的redaction flag / 件数だけを送ります。P09は固定80文字のprefixかつ予約marker `CMCP_09_LONG_`全体を含む場合だけfixture扱いします。DirectAccessのobject unique name getterはambient文字列を取得しないよう意図的に呼び出さず、fixed allowlist外のtype名とhost exception textも送信前にredactまたは固定code化します。tree位置、親子関係、安全なboolean / numeric metadataはscope差を観測するため保持します。runtime capabilityの固定`data_minimization`契約とartifact digestが一致しないrunを開始しません。
 
 offline validationはrepository rootで次をすべて実行します。
 
@@ -153,6 +161,15 @@ target/release/cubase_track_probe_collector \
 
 `--run-id`にはcredential、project名、個人名、顧客名、absolute pathを含めません。collectorは観測fileを自動作成せずstdoutへ出力するため、repository内へredirectしません。primary runでは上記の1000 ms discoveryと5000 ms graceful drainを固定し、変更したrunは値と理由を記録してprimary comparisonから分離します。
 
+collector終了後、raw JSONLとaudit manifestを次のauditorへ同時に渡します。最初の出力先はrepository外とし、exit statusが成功でsanitized JSONを得られた場合だけ内容を確認します。raw JSONLやmanifestのpath、raw host ID、port / device名をauditor stdoutへ含めません。
+
+```text
+target/release/cubase_track_probe_audit \
+  --manifest <REPOSITORY_OUTSIDE>/CMCP_TrackProbe_<RUN_ID>.manifest.json \
+  --jsonl <REPOSITORY_OUTSIDE>/CMCP_TrackProbe_<RUN_ID>.jsonl \
+  > <REPOSITORY_OUTSIDE>/CMCP_TrackProbe_<RUN_ID>.audit.json
+```
+
 ### JSONL v1 record契約
 
 collectorが出力する全recordは最低限次の共通fieldを持ちます。
@@ -183,22 +200,31 @@ capability result
 
 APIが値を提供しないfieldは`null`またはfield不存在のままにし、直前値やUI ground truthで補いません。`host_id_alias`と必要な場合のSHA-256はraw JSONL検証後に作るcommitted summaryだけの値です。Probeとcollectorはcallbackの到着順を維持し、同一timestampのrecordを並べ替えません。
 
+### audit manifest v1 / UI annotation sidecar
+
+raw JSONLとは別に、fixtureの[runtime evidenceの3 artifact](track-api-fixture.md#runtime-evidenceの3-artifact)で定義する`audit_manifest_version = 1`のmanifestをrepository外へ作成します。manifestは`fixture_revision = 2`、raw JSONLと同じ`run_id`、raw開始時刻とmillisecond単位で一致する`run_started_at`、`c13_mixer_bank`または`c15_combined` profile、exact host / OS / API、repository commit、一致するprobe source / installer embedded / deployedの3 digest、実行したcollector binary digest、fixture acceptance、5000 ms window、30000 ms reconnect deadline、O1 status、必須checkpointごとのUI annotationを保持します。raw host ID、port / device名、absolute pathをmanifestへ転記しません。
+
+raw JSONLの`collector_summary.exit_ok`は通信streamのintegrityだけを表し、必要なfixture case、UI確認、final snapshot、環境・digest一致を証明しません。auditorはprofileから必須coverageを導出し、raw JSONLとmanifestの双方をfail closedで検証します。どちらか一方しかないrun、manifestとraw JSONLの`run_id`が違うrun、fixture revision 1のrun、自動初期snapshotしかないrunを`OBSERVED`へ使いません。
+
+両profileの必須checkpoint IDはfixtureで定義したexactly 44個です。各checkpointはbegin後・実操作直前のraw `collector_action` markerをexactly 1件必要とします。cutを使う21 checkpointではcollectorが成功cut responseと、同request ID / epochかつ`boundary_source = probe.observation.cut_response`のaction markerをatomic output pairとして隣接出力し、operatorは別のmarkerを送らず、その自動marker直後にUI操作します。このmarkerを5000 ms windowの監査anchorとします。E8 / C1 bank navigationではReset / Next / Prev成功response、`INIT` / `R1` / `R2`では明示的action markerがanchorです。final snapshotは対応anchorから5000 ms以上後でなければなりません。navigation checkpointはmarkerから1000 ms以内にID suffixどおりの操作を送り、同じconfigの明示的`probe.bank.snapshot`を必要とします。それ以外の`INIT` / `E0` / `E1` / `E8` / `C1`、S0〜S9、R1 / R2はfinal `MB_CORE_ALL`と`MB_CORE_VISIBLE` bank snapshotを両方必要とします。C15-COMBINED、およびINITのruntime capabilityがDirectAccessをsupported / activeと報告したC13 runでは、各checkpointで`probe.direct_access.snapshot`を先に完了させ、その後に必要なbank snapshotを完了させます。C13で継続可能なunsupported分岐は`supported: false, active: false`かつ固定のunavailable / incomplete reason、DirectAccess eventなしだけです。`supported: true, active: false`、activation error、またはその他の組合せはMB-only成功へ読み替えずrun invalidとします。`INIT`はaction marker後にCubaseを起動し、初期snapshot完了後にreadyとなったことを検証してからdiscoverとcapabilitiesを完了します。cold launchはR1 / R2用の30秒deadlineへ含めません。R1 / R2はaction markerから30000 ms以内に新しいreadyと再discoverを完了し、ready / discoveryから10000 ms以内にfinal snapshotを完了させます。
+
 ### command、checkpoint、integrity契約
 
-stdinは1行1 JSONです。`collector.checkpoint.begin` / `collector.checkpoint.end`はcollector内だけで処理し、Cubaseへ送信しません。
+stdinは1行1 JSONです。`collector.checkpoint.begin` / `collector.action` / `collector.checkpoint.end`はcollector内だけで処理し、Cubaseへ送信しません。
 
 ```json
-{"method":"collector.checkpoint.begin","params":{"checkpoint_id":"B0-reset","window_ms":5000}}
-{"method":"collector.checkpoint.end","params":{"checkpoint_id":"B0-reset"}}
+{"method":"collector.checkpoint.begin","params":{"checkpoint_id":"E8-MB_CORE_ALL-B0-reset","window_ms":5000}}
+{"method":"collector.action","params":{"checkpoint_id":"E8-MB_CORE_ALL-B0-reset"}}
+{"method":"collector.checkpoint.end","params":{"checkpoint_id":"E8-MB_CORE_ALL-B0-reset"}}
 ```
 
 - checkpoint IDは同一run内で一意とし、同時に複数を開かない。
-- `begin`をUI操作またはProbe commandより前に記録し、`end`は5000 msの完全なwindow、必要なfinal snapshot、関連response / chunkの完了後に送る。
+- `begin`後、実操作直前に同じIDのaction markerをexactly 1回記録する。`E0` / `E1` / `E8` / `C1`とS0〜S9のexactly 21 checkpointでは、最初のtargeted commandとして`probe.observation.cut`を`@selected`へ送る。成功responseはcollectorがraw responseと同request ID / epochのaction markerをatomic output pairとして隣接出力するため、operatorは`collector.action`を重ねず、自動marker直後にUI操作する。`INIT` / `R1` / `R2`と、Reset / Next / Prevが新しいbank generationを作るE8 / C1 navigationではcutを送らず、明示的`collector.action`を使う。navigation commandはmarkerから1000 ms以内に送る。cut checkpointと`INIT` / `R1` / `R2`はaction marker、navigationは操作成功responseを観測anchorとし、対応anchorから5000 ms以上を経過させた後、checkpoint内で利用中の各projectionへ明示的final snapshot commandを送る。DirectAccessがactiveならDirectAccessを最初に完了し、同期`update()`が生むfeedbackもその完了前に収め、その後に必要なbank projectionを送る。最初のfinal snapshot完了後は、後続する同じsetの明示的snapshot request / response / chunk以外のprobe messageやhost callbackを許さない。set最後のresponse / 全chunk完了後から`end`までもprobe messageもhost callbackも1件もない状態で1000 ms以上quietを満たし、UI annotationを完了してからだけ`end`を送る。set途中または最後のsnapshot後に予期しないmessageが届いたrunは、quiet timerだけを再開して成功扱いにしない。
 - 5000 ms未満の`end`、対応しないID、開いたcheckpointを残したEOFはfatalとする。
 - 初期load、reload、restartを含むProbe観測も専用checkpointで囲む。期待していないProbe recordがcheckpoint外または終了後に届いた場合はorphanとして記録し、そのsequenceを成功にしない。
-- Probe commandはactive checkpoint内だけで許可し、MIDI送信前の`probe_command`（`phase: started`）と`probe_command_send_result`を別々に記録する。request、response / error、必要なsnapshot follow-upは同じcheckpoint IDへ結び付け、送信失敗を送信済みとして扱わない。
+- Probe commandはactive checkpoint内だけで許可し、`probe_command`（`phase: started`）と`probe_command_send_result`を別々に記録する。collector自体は診断用に明示的なinstance IDも扱い、その経路ではcommand recordをMIDI送信前に出力するが、audit v1 runではdiscover以外の全commandをcollector-localの`@selected`経路に固定し、両evidence recordの`evidence_emission: after_midi_send_attempt`で逸脱を拒否する。`@selected`は送信barrier内で実IDへ解決するため、stdout I/Oでbarrierを塞がないよう、実ID入りcommand recordとsend-resultを送信試行直後に連続出力し、send完了時のmonotonic timestampを付ける。この経路では高速なresponseと、それに隣接するcut用auto action markerのpairが両command evidence recordより先にJSONLへ現れ得るので、auditorはfile順やevidence emit時刻を送信順と推測せずrequest ID、send-completed timestamp、response receive timestampで対応付ける。どちらの経路もrequest、response / error、必要なsnapshot follow-upを同じcheckpoint IDへ結び付け、送信失敗を送信済みとして扱わず、送信後のevidence出力失敗は結果不明のfatal runとする。
 - Probe command送信とcheckpoint終了の直前にMIDI ingress barrierを通し、その時点までに開始したcallback、分割受信中のSysEx、受信済みqueueをProtocol trackerへ反映する。未完SysEx、未処理、queue overflow、barrier timeout、integrity failureがあればcommandを送信せずfail closedにする。
-- 未完request、discovery window、snapshot follow-up、chunkがある間はcheckpointを終了しない。callback受信時刻が終了marker以前なら、collector側の処理がmarker後になっても同じcheckpointへ分類する。
+- 未完request、discovery window、snapshot follow-up、chunkがある間はcheckpointを終了しない。自動初期snapshot、操作直後のcallback、直前checkpointのsnapshotはfinal snapshotとして数えない。callback受信時刻が終了marker以前なら、collector側の処理がmarker後になっても同じcheckpointへ分類する。
 
 discoveryだけは`target_instance_id: null`でbroadcastし、既定1000 msのbounded discovery windowを最後まで待ちます。windowはrequest登録時ではなく、`probe_command_send_result`が`sent: true`となった送信時点から開始し、未送信requestをtimeout済みとして扱いません。
 
@@ -206,14 +232,27 @@ discoveryだけは`target_instance_id: null`でbroadcastし、既定1000 msのbo
 {"target_instance_id":null,"method":"probe.discover","params":{}}
 ```
 
-0 instance、複数instance、初期化未完のinstanceが応答したrunではtargetを選ばずfatalにします。`probe.ready(true)`済みのexactly 1 instanceをwindow全体で確認した後のcommandだけが、その`source_instance_id`を明示して直列に送信されます。page deactivate / reactivate、reload、restartでmapping lifecycleが変わった後は選択を破棄し、再discoverします。
+0 instance、複数instance、初期化未完のinstanceが応答したrunではtargetを選ばずfatalにします。`probe.ready(true)`済みのexactly 1 instanceをwindow全体で確認した後のcommandだけが、collector-localの`@selected`を送信barrierでそのsourceへ解決して直列に送信されます。page deactivate / reactivate、reload、restartでmapping lifecycleが変わった後は選択を破棄し、再discoverします。operator-facing commandやmanifestへraw source IDをcopyしません。
+
+E0 / E1 / E8 / C1やS9のproject切替を含む通常checkpointでも、hostが同じscript sourceをpage deactivate / reactivateする場合があります。その場合は操作を追加せず、同じcheckpoint内でaction後の`probe.ready(false)` → 同sourceの`probe.mapping_active` → capability → 全初期snapshot → `probe.ready(true)`をexactly 1 sequenceとして完了させ、再discoverしてからfinal snapshotへ進みます。新しい`probe.loaded`はINIT / R1 / R2以外では許可しません。lifecycleが無いrunへこのsequenceを捏造せず、partial、複数回、action前のsequence流用、再discoverなしをauditorが拒否します。
+
+以下は独立したcommand例であり、1 checkpoint内の連続sequenceではありません。`probe.capabilities.get`は`INIT`だけ、`probe.observation.cut`は上記21 checkpointだけ、bank操作は対応navigation checkpointだけで使います。final snapshotはcheckpoint契約に従って必要なprojectionを順に送ります。
 
 ```json
-{"target_instance_id":"<SOURCE_INSTANCE_ID>","method":"probe.capabilities.get","params":{}}
-{"target_instance_id":"<SOURCE_INSTANCE_ID>","method":"probe.bank.reset","params":{"config_id":"MB_CORE_ALL"}}
-{"target_instance_id":"<SOURCE_INSTANCE_ID>","method":"probe.bank.snapshot","params":{"config_id":"MB_CORE_ALL"}}
-{"target_instance_id":"<SOURCE_INSTANCE_ID>","method":"probe.direct_access.snapshot","params":{}}
+{"target_instance_id":"@selected","method":"probe.capabilities.get","params":{}}
 ```
+
+```json
+{"target_instance_id":"@selected","method":"probe.observation.cut","params":{}}
+```
+
+```json
+{"target_instance_id":"@selected","method":"probe.bank.reset","params":{"config_id":"MB_CORE_ALL"}}
+{"target_instance_id":"@selected","method":"probe.bank.snapshot","params":{"config_id":"MB_CORE_ALL"}}
+{"target_instance_id":"@selected","method":"probe.direct_access.snapshot","params":{}}
+```
+
+`probe.observation.cut`はProbe内のbounded epochを進めます。Mixer Bank fieldとDirectAccess callbackはcallback発生時のepochを保持し、cut前にqueue済みの値がcut後にflushされても旧epochのままです。auditorはcut responseと一致しないMixer Bank fieldを`stale`として値を共有reportで`null`にし、DirectAccess callback / live snapshotもrecordのepochと固定statusを検証します。上限到達時はwrapせずreload-requiredのfatal runとします。
 
 targeted requestは、同じrequest IDに対する同じ`source_instance_id`からのresponseまたはerrorがexactly once必要です。unmatched、duplicate、wrong-source、未応答のrequest、および成功response後に必要なsnapshot follow-upがない状態はfatalです。
 
@@ -226,37 +265,38 @@ targeted requestは、同じrequest IDに対する同じ`source_instance_id`か�
 この手順はruntime artifactを作成しますが、本revisionではまだ実施していません。
 
 1. 通常projectを保存して閉じ、対象Cubaseも終了した状態で、他のCubase instanceがないことを確認する。
-2. offline validationをすべて実行し、repository commitとprobe source SHA-256をlocal run recordへ記録する。
+2. offline validationをすべて実行し、repository commit、probe source SHA-256、実行するcollector release binary SHA-256をlocal run recordへ記録する。
 3. Cubaseを終了したまま、対象Cubase製品の既存`MIDI Remote/Driver Scripts/Local`だけを`--midi-remote-root`へ指定し、`target/release/cubase_mcp --install-track-probe --midi-remote-root <LOCAL_ROOT>`でprobeを配備する。Cubase rootが0件・複数候補、root形状不正、別Steinberg製品、Cubase process検出、process確認失敗ではscriptを作成せず停止する。installerは既存pathを上書きも削除もせず、異なるprobeが存在すれば常に拒否する。必要なら既存fileを手動で退避・確認・削除してから再実行する。新規pathは`create_new`で確保し、symlinkを拒否して書込み後digestを検証する。作成後の書込み・検証・durability確認に失敗したpathは競合file保護のため自動削除せず、手動確認する。JSON reportのabsolute pathはlocalにだけ残し、repository source SHA-256、`embedded_source_sha256`、`deployed_sha256`の三者が完全一致しなければrunを開始しない。最初と作成直前のprocess checkの間にもCubaseを起動しない。
-4. repository外を出力先にし、`--run-id <RUN_ID>`付きでcollectorを先に起動する。最初の`collector_started` recordを確認し、固有IDの初期化checkpointを開始する。
-5. 初期化checkpoint内で対象Cubaseを1 instanceだけ起動してprobeを新規loadする。R1ではcollectorを動かしたまま、reload用checkpointを開始してから明示的にReload Scriptsする。
+4. repository外を出力先にし、`--run-id <RUN_ID>`付きでcollectorを先に起動する。最初の`collector_started` recordを確認し、exact ID `INIT`の初期化checkpointを開始する。`collector.action`を記録した直後にだけ対象Cubaseを起動する。
+5. 初期化checkpoint内で対象Cubaseを1 instanceだけ起動してprobeを新規loadする。R1ではcollectorを動かしたままreload用checkpointを開始し、action marker直後に明示的にReload Scriptsする。R2もmarker直後に正常終了操作を開始する。
 6. 新しい`source_instance_id`から`source_seq = 1`の`probe.loaded`を受信したことを確認する。これを新しいprobe sessionの開始markerとする。続く同じsourceの`probe.mapping_active`でpage activation境界を確認する。
-7. capability recordと全初期snapshotのcomplete chunkを受信した後、同じsourceから`probe.ready`の`ready: true`かつ`initial_snapshots_complete: true`を確認する。順序や完全性が違う場合は開始しない。同じscript sessionのpage再activationは新しい`probe.loaded`ではなく`probe.mapping_active`から始まり、再度readyになるまで操作しない。
-8. `probe.discover`を送信し、bounded discovery window全体でexactly 1 responderだけであることを確認する。その`source_instance_id`だけを後続requestのtargetにし、初期化checkpointを完全なwindow経過後に終了する。
-9. fixtureの再現性checklistを完了し、E0、E1、C1、M1、必要な場合だけO1を順に観測する。
-10. 各bank / mutation操作を固有checkpointで囲み、完全なcallback window、final snapshot、request / chunk / sequence integrityを確認してから次の操作へ進む。
-11. R1 reloadとR2 restartは独立phaseとして実施し、各phaseの前後でsession境界とsnapshotを記録する。
+7. `probe.capabilities` record、その後に`reason = page_activate`の`MB_CORE_ALL` / `MB_CORE_VISIBLE`初期snapshot、runtime capabilityがDirectAccessをsupported / activeとした場合はその初期snapshotもcompleteになった後、同じsourceから`probe.ready`の`ready: true`かつ`initial_snapshots_complete: true`を確認する。`probe.loaded` → `probe.mapping_active` → capability → 全初期snapshot完了 → readyの順序や完全性が違う場合は開始しない。同じscript sessionのpage再activationは新しい`probe.loaded`ではなく`probe.mapping_active`から始まり、再度同じ初期化sequenceが完了するまで操作しない。
+8. `probe.discover`を送信し、bounded discovery window全体でexactly 1 responderだけであることを確認する。後続requestにはoperator側で`@selected`を使い、raw source IDを表示・copyしない。`INIT` action markerから5000 ms以上経過後、C15またはC13でDirectAccessがsupported / activeならDirectAccessを最初に、続けて`MB_CORE_ALL`、`MB_CORE_VISIBLE`の明示的final snapshotを取得し、最後のchunk後にmessageが1件もない1000 ms quietを満たしてから初期化checkpointを終了する。
+9. fixtureの再現性checklistを完了し、E0、E1、E8、C1、M1を順に観測する。case open / snapshotはexact ID `E0`、`E1`、`E8`、`C1`、E8 navigationは`E8-<CONFIG>-<STEP>`、C1 navigationは`C1-<CONFIG>-<STEP>`、mutation / project切替はS0〜S9を使う。project切替等で同sourceの再activationが発生した場合は上記sequenceと再discoverを同じcheckpoint内で完了させる。O1はaudit v1 / primary Probeに含めず`skipped / not_separately_authorized`固定とする。
+10. 各bank / mutation操作を固有checkpointで囲む。E0 / E1 / E8 / C1とS0〜S9はobservation cutの成功responseと隣接する自動action markerを確認し、別のmarkerを送らず、その直後に操作する。E8 / C1 navigationは明示的marker直後に操作する。cut checkpointは自動marker、navigationは操作成功responseを観測anchorとして5000 ms以上待った後に明示的final snapshotを要求する。Cubase 15またはC13でDirectAccessがsupported / activeならDirectAccessを最初に取得し、navigationはその後に操作config、その他は`MB_CORE_ALL`と`MB_CORE_VISIBLE`の両方を取得する。最後のresponse / chunk後に新しいmessageがないこと、追加1000 ms quiet、UI annotation、sequence integrityを確認してから次の操作へ進む。
+11. R1 reloadとR2 restartは独立phaseとして実施する。R1のpre-stateは`S9-baseline`、R2のpre-stateはR1の監査済みfinal snapshotを参照し、R1/R2内に追加のpre-action snapshot commandを送らない。
 12. active checkpointがなく、request / follow-up / snapshotがquiescentなことを確認してstdinをEOFにする。graceful drain後の`collector_summary`を確認する。
 13. gap、duplicate、逆順、overflow、orphan、未完request / chunk / fragment、truncation、fatal diagnosticが1件でもあれば、そのrunを完全性の証拠にしない。
-14. この文書にはredacted集計と最小限の合成名例だけを転記する。raw JSONLを移動・copy・stageしない。
+14. raw JSONLとaudit manifest v1をfail-closed auditorへ同時に入力し、必須coverageとredaction検査を通過させる。この文書にはredacted audit reportの集計と最小限の合成名例だけを転記し、raw JSONLを移動・copy・stageしない。
 15. cleanup後、`git status --short`で意図したsource / document以外のartifactがないことを確認する。
 
 ## Callback観測windowとsequence判定
 
 ### Callback観測window
 
-fixtureに従い、bank操作とmutation操作は操作直前から記録し、操作開始から必ず`5000 ms`観測します。最初のquiet periodで早期終了しません。
+fixtureに従い、cut対象操作はcut成功responseとatomic pairで隣接する自動action marker直後、navigationとlifecycle操作は明示的marker直後に行い、checkpoint種別ごとの観測anchorから必ず`5000 ms`観測します。checkpoint begin、cut response、navigation commandより前のmarkerからの経過時間で代用せず、最初のquiet periodで早期終了しません。
 
 次の条件をすべて満たすcheckpointだけを`OBSERVED`にできます。
 
-- window最後の`1000 ms`にprobe callbackがない。
+- 明示的final snapshotの最後のresponse / chunk後からcheckpoint終了までprobe messageもhost callbackも1件もなく、連続`1000 ms`以上quietである。snapshot完了直後にcheckpointを閉じず、後着messageがあればrunを停止する。
 - UI ground truthを確認でき、access方式がsnapshot / ready状態を提供する場合はそれも取得できた。
+- 5000 ms経過後、checkpoint終了前に必要なMixer Bank config（navigationは操作config、その他はALL / VISIBLE両方）の明示的final snapshotがcompleteになった。C15-COMBINED、およびDirectAccessがruntimeでsupported / activeだったC13 runではDirectAccessの明示的final snapshotもcompleteになり、その後の追加quiet periodも満たした。
 - 直前checkpointのwindow終了後から次のUI操作前までにorphan callbackがない。
 - 同一probe sessionのsequence検査にgap、duplicate、逆順がない。
 
-期限までcallbackが続く、必要なsnapshotがない、またはwindow後にcallbackが届いた場合は`INCONCLUSIVE_CALLBACK_TIMEOUT`としてsequenceを停止します。遅延recordは`orphan_after_<checkpoint>`と記録し、次のUI操作を行いません。
+期限までcallbackが続く、必要なsnapshotがない、final snapshot後にmessageが届く、またはwindow後にcallbackが届いた場合は`INCONCLUSIVE_CALLBACK_TIMEOUT`としてsequenceを停止します。遅延recordは`orphan_after_<checkpoint>`と記録し、次のUI操作を行いません。
 
-collectorはcheckpoint終了時に上記`1000 ms` quiet periodを検証します。終了marker以前に受信され、終了処理後にqueueから取り出されたcallbackもreceive timestampで判定し、quiet period内ならintegrity failureとします。
+collectorはcheckpoint終了時に上記`1000 ms` quiet periodをlast-message clockで検証します。final snapshotのresponse / chunkを含むprobe messageもclockを更新します。auditorはそれに加えて、final setの最初のsnapshot完了後からは後続する同じsetの明示的snapshot request / response / chunkだけを許し、set最後のsnapshotより後のprobe recordを1件でも拒否します。終了marker以前に受信され、終了処理後にqueueから取り出されたmessage / callbackもreceive timestampで判定し、異なるUI状態のprojectionや古いsnapshotをquietだけで成功扱いにしません。
 
 ### Sequence integrity
 
@@ -278,14 +318,33 @@ reload / restartをまたぐsequence値を同じ系列として比較しませ�
 
 ## Runtime run matrix
 
-| run | exact host | API | access | fixture cases | status |
+| physical run / profile | exact host | API | access projection | fixture cases | status |
 | --- | --- | --- | --- | --- | --- |
-| C13-MB | Cubase 13.0.30.226 | v1.1 | Mixer Bank | E0 / E1 / C1 / M1 / R1 / R2、O1は安全時のみ | `PENDING` |
+| C13-MB / `c13_mixer_bank` | Cubase 13.0.30.226 | v1.1 | Mixer Bank（runtimeでsupported / activeならDirectAccessも同runで条件付き取得） | E0 / E1 / E8 / C1 / M1 / R1 / R2。O1は別途許可時のみ | `PENDING` |
 | C13.0.50 | `NOT_AVAILABLE` | v1.2 | Mixer Bank / DirectAccess | `NOT_AVAILABLE` | `NOT_AVAILABLE` |
-| C15-MB | Cubase 15.0.30.287 | v1.3 | Mixer Bank | E0 / E1 / C1 / M1 / R1 / R2、O1は安全時のみ | `PENDING` |
-| C15-DA | Cubase 15.0.30.287 | v1.3 | DirectAccess | E0 / E1 / C1 / M1 / R1 / R2、O1は安全時のみ | `PENDING` |
+| C15-COMBINED / `c15_combined` | Cubase 15.0.30.287 | v1.3 | Mixer Bank + DirectAccess | E0 / E1 / E8 / C1 / M1 / R1 / R2。O1は別途許可時のみ | `PENDING` |
 
-各runでedition、About表示、実施日時 / timezone、repository commit、probe digest、MixConsole surface / visibility sync、filter、callback window、reconnect deadlineを追記します。
+Cubase 15のMixer BankとDirectAccessは別のCubase起動・collector process・run IDではありません。単一のC15-COMBINED physical runで、各UI操作、5000 ms window、session境界を共有し、同一checkpoint内にDirectAccess snapshotを先に、必要なMixer Bank snapshotを続けて取得します。以下のC15-MB / C15-DA列と節は、その同じraw JSONLから作る2つのprojectionです。一方のprojectionが不完全でも別runの結果で穴埋めしません。C13でもruntime capabilityがDirectAccessをsupported / activeと報告した場合は同じ順序と完全性条件を適用し、結果を条件付きC13 DirectAccess projectionとしてredacted reportへ残します。`supported: false, active: false`だけをunsupportedとして受理し、inactiveやactivation失敗をAPI versionから推測でunsupportedへ丸めません。
+
+各physical runでedition、About表示、実施日時 / timezone、repository commit、probe digest、MixConsole surface / visibility sync、filter、callback window、reconnect deadlineを追記します。両profileともrevision 2のexactly 44 checkpoint IDを1回ずつ必要とします。
+
+### E8 exact-width境界観測
+
+E8はprimary bank幅とeligibleなProject由来channel数がexactly 8の独立fixtureです。最初の`E8` checkpointでprojectを開き、両bank configのfinal snapshotを取得します。続くnavigation各行では操作成功responseから5000 ms以上を観測した後、操作configの明示的bank final snapshotを取得します。C15-COMBINED、およびruntimeでDirectAccessがactiveだったC13 runではDirectAccess final snapshotを先に取得し、その後に必要なbank final snapshotを取得します。最後のsnapshot完了後に追加1000 msのmessage-free quiet periodを置き、同じUI ground truthに対する別projectionとして記録します。
+
+| checkpoint ID | expected UI ground truth | C13-MB | C13-DA conditional | C15-MB projection | C15-DA projection |
+| --- | --- | --- | --- | --- | --- |
+| `E8` | E8 projectを開き、E8-01〜E8-08の8 Audioだけが存在 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| `E8-MB_CORE_ALL-B0-reset` | E8-01〜E8-08、8 Audio、全visible | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| `E8-MB_CORE_ALL-B1-next` | UI inventory不変。hostの境界挙動は未推測 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| `E8-MB_CORE_ALL-B2-prev` | UI inventory不変 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| `E8-MB_CORE_ALL-B3-reset` | E8-01〜E8-08、8 Audio、全visible | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| `E8-MB_CORE_VISIBLE-B0-reset` | E8-01〜E8-08、8 Audio、全visible | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| `E8-MB_CORE_VISIBLE-B1-next` | UI inventory不変。hostの境界挙動は未推測 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| `E8-MB_CORE_VISIBLE-B2-prev` | UI inventory不変 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| `E8-MB_CORE_VISIBLE-B3-reset` | E8-01〜E8-08、8 Audio、全visible | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+
+same / empty / no callbackのいずれか1つだけをbank終端として扱いません。E8、C1のbank幅超過、C1 final partial bankを合わせ、callbackとsnapshotが重複・欠落なく有限に収束するかを評価します。
 
 ## Cubase 13.0.30 / API v1.1 Mixer Bank観測
 
@@ -311,18 +370,18 @@ reload / restartをまたぐsequence値を同じ系列として比較しませ�
 
 | config | checkpoint | ordered fixture labels / empty slots | callback count | seq integrity | result |
 | --- | --- | --- | ---: | --- | --- |
-| `MB_CORE_ALL` | B0-reset | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
-| `MB_CORE_ALL` | B1-next | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
-| `MB_CORE_ALL` | B2-next | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
-| `MB_CORE_ALL` | B3-extra-next | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
-| `MB_CORE_ALL` | B4-prev | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
-| `MB_CORE_ALL` | B5-reset | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
-| `MB_CORE_VISIBLE` | B0-reset | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
-| `MB_CORE_VISIBLE` | B1-next | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
-| `MB_CORE_VISIBLE` | B2-next | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
-| `MB_CORE_VISIBLE` | B3-extra-next | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
-| `MB_CORE_VISIBLE` | B4-prev | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
-| `MB_CORE_VISIBLE` | B5-reset | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
+| `MB_CORE_ALL` | `C1-MB_CORE_ALL-B0-reset` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
+| `MB_CORE_ALL` | `C1-MB_CORE_ALL-B1-next` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
+| `MB_CORE_ALL` | `C1-MB_CORE_ALL-B2-next` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
+| `MB_CORE_ALL` | `C1-MB_CORE_ALL-B3-extra-next` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
+| `MB_CORE_ALL` | `C1-MB_CORE_ALL-B4-prev` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
+| `MB_CORE_ALL` | `C1-MB_CORE_ALL-B5-reset` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
+| `MB_CORE_VISIBLE` | `C1-MB_CORE_VISIBLE-B0-reset` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
+| `MB_CORE_VISIBLE` | `C1-MB_CORE_VISIBLE-B1-next` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
+| `MB_CORE_VISIBLE` | `C1-MB_CORE_VISIBLE-B2-next` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
+| `MB_CORE_VISIBLE` | `C1-MB_CORE_VISIBLE-B3-extra-next` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
+| `MB_CORE_VISIBLE` | `C1-MB_CORE_VISIBLE-B4-prev` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
+| `MB_CORE_VISIBLE` | `C1-MB_CORE_VISIBLE-B5-reset` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
 
 ### Scopeと完全性
 
@@ -330,24 +389,27 @@ reload / restartをまたぐsequence値を同じ系列として比較しませ�
 | --- | --- | --- | --- | --- |
 | E0 Project inventory | 0 Project Track | `PENDING` | `PENDING` | `PENDING` |
 | E1 | Audio Track 1本 | `PENDING` | `PENDING` | `PENDING` |
+| E8 exact-width | E8-01〜E8-08のAudio 8本 | `PENDING` | `PENDING` | `PENDING` |
 | C1 Project inventory | P01〜P20 | `PENDING` | `PENDING` | `PENDING` |
 | C1 all core channels | P02〜P20 | `PENDING` | `PENDING` | `PENDING` |
 | C1 visible core channels | P02〜P07、P09〜P20 | `PENDING` | `PENDING` | `PENDING` |
-| O1 Input / Output / VCA | fixtureで安全に作成できた行 | `PENDING` | `PENDING` | `PENDING` |
+| O1 Input / Output / VCA | audit v1では対象外 | `SKIPPED` | `SKIPPED` | `SKIPPED` |
 
-Probeはcore比較用の`MB_CORE_ALL` / `MB_CORE_VISIBLE`に加え、fixtureのO1手順と同じ次のoptional configを実装しています。O1を安全に作成できたrunだけで使い、各configを独立したB0〜B5 sequenceとして観測します。
+primary Track Probeは`MB_CORE_ALL` / `MB_CORE_VISIBLE`だけを実装します。ambientなInput / Output / VCA titleやIDを未許可でraw JSONLへ取り込まないため、次の`MB_OPTIONAL_*` configは現行buildに存在せず、audit manifest v1も`optional_o1.status = "skipped"`と固定理由`not_separately_authorized`だけを受け付けます。
 
-| config | channel type | window zone | followVisibility |
+| future config | channel type | window zone | status |
 | --- | --- | --- | --- |
-| `MB_OPTIONAL_MAIN` | VCA / Input / Outputだけをinclude | unlocked main。API v1.1ではleft / right excludeによるimplicit main | false |
-| `MB_OPTIONAL_LEFT` | VCA / Input / Outputだけをinclude | left | false |
-| `MB_OPTIONAL_RIGHT` | VCA / Input / Outputだけをinclude | right | false |
+| `MB_OPTIONAL_MAIN` | VCA / Input / Output | unlocked main | future separate profile only |
+| `MB_OPTIONAL_LEFT` | VCA / Input / Output | left | future separate profile only |
+| `MB_OPTIONAL_RIGHT` | VCA / Input / Output | right | future separate profile only |
 
-optional configの存在はInput / Output / VCAがruntimeで返る証拠ではありません。既存busもslotへ現れ得るためfixture entityだけに絞ったと推測せず、raw snapshot全体を記録します。
+O1を将来実装するときは、別途明示的な許可、専用Probe build、capability ID、audit profile、pre-run inventory、cleanup検証を先に追加します。primary Probeへoptional zoneを常時作成したり、core runのmanifestだけを`observed`へ変更したりしません。
 
 `B3-extra-next`が同一snapshotに見えることだけを終端証拠にしません。repeat bank、前値維持、callback欠落を区別できなければ完全列挙は`PENDING`または`INCONCLUSIVE_*`のままです。
 
-## Cubase 15.0.30 / API v1.3 Mixer Bank観測
+## Cubase 15.0.30 / API v1.3 Mixer Bank projection
+
+この節はC15-COMBINED physical runのMixer Bank projectionです。
 
 ### Host accessと初期化
 
@@ -367,24 +429,24 @@ optional configの存在はInput / Output / VCAがruntimeで返る証拠では�
 
 | config | checkpoint | ordered fixture labels / empty slots | callback count | seq integrity | result |
 | --- | --- | --- | ---: | --- | --- |
-| `MB_CORE_ALL` | B0-reset | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
-| `MB_CORE_ALL` | B1-next | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
-| `MB_CORE_ALL` | B2-next | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
-| `MB_CORE_ALL` | B3-extra-next | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
-| `MB_CORE_ALL` | B4-prev | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
-| `MB_CORE_ALL` | B5-reset | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
-| `MB_CORE_VISIBLE` | B0-reset | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
-| `MB_CORE_VISIBLE` | B1-next | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
-| `MB_CORE_VISIBLE` | B2-next | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
-| `MB_CORE_VISIBLE` | B3-extra-next | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
-| `MB_CORE_VISIBLE` | B4-prev | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
-| `MB_CORE_VISIBLE` | B5-reset | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
+| `MB_CORE_ALL` | `C1-MB_CORE_ALL-B0-reset` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
+| `MB_CORE_ALL` | `C1-MB_CORE_ALL-B1-next` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
+| `MB_CORE_ALL` | `C1-MB_CORE_ALL-B2-next` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
+| `MB_CORE_ALL` | `C1-MB_CORE_ALL-B3-extra-next` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
+| `MB_CORE_ALL` | `C1-MB_CORE_ALL-B4-prev` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
+| `MB_CORE_ALL` | `C1-MB_CORE_ALL-B5-reset` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
+| `MB_CORE_VISIBLE` | `C1-MB_CORE_VISIBLE-B0-reset` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
+| `MB_CORE_VISIBLE` | `C1-MB_CORE_VISIBLE-B1-next` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
+| `MB_CORE_VISIBLE` | `C1-MB_CORE_VISIBLE-B2-next` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
+| `MB_CORE_VISIBLE` | `C1-MB_CORE_VISIBLE-B3-extra-next` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
+| `MB_CORE_VISIBLE` | `C1-MB_CORE_VISIBLE-B4-prev` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
+| `MB_CORE_VISIBLE` | `C1-MB_CORE_VISIBLE-B5-reset` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
 
 ### ScopeとID寿命
 
 | 項目 | 観測値 | result |
 | --- | --- | --- |
-| E0 / E1の件数と順序 | `PENDING` | `PENDING` |
+| E0 / E1 / E8の件数と順序 | `PENDING` | `PENDING` |
 | C1のscope / hidden P08 | `PENDING` | `PENDING` |
 | 同名P02 / P03のID分離 | `PENDING` | `PENDING` |
 | Unicode / 長いtitle | `PENDING` | `PENDING` |
@@ -393,7 +455,23 @@ optional configの存在はInput / Output / VCAがruntimeで返る証拠では�
 | project切替後のID | `PENDING` | `PENDING` |
 | reload / restart後のID | `PENDING` | `PENDING` |
 
-## Cubase 15.0.30 / API v1.3 DirectAccess観測
+## Cubase 13.0.30 conditional DirectAccess projection
+
+INIT capabilityがDirectAccessを`supported: false, active: false`と報告し、固定のunavailable / incomplete reasonと整合した場合だけ、この節を`UNSUPPORTED_RUNTIME`として固定し、DA snapshotやeventを捏造しません。supported / activeだった場合は同じC13 physical runの全44 checkpointから作るprojectionをここへ記録し、後続のC15詳細表と同じlifecycle、tree、metadata、change callback項目を評価します。supportedだがinactive、activation error、または組合せ不整合はこの表へ`UNSUPPORTED`として記録せずrunを停止します。
+
+| 項目 | 観測値 | result |
+| --- | --- | --- |
+| runtime capability summary | `PENDING` | `PENDING_CONDITIONAL` |
+| activation初期snapshot / ready順 | `PENDING` | `PENDING_CONDITIONAL` |
+| E0 / E1 / E8 / C1 tree scopeと順序 | `PENDING` | `PENDING_CONDITIONAL` |
+| unique ID / title / type等metadata | `PENDING` | `PENDING_CONDITIONAL` |
+| rename / add / delete / visibility / state callback | `PENDING` | `PENDING_CONDITIONAL` |
+| reload / restart後の回復とID寿命 | `PENDING` | `PENDING_CONDITIONAL` |
+| redacted reportの44 final projections | `PENDING` | `PENDING_CONDITIONAL` |
+
+## Cubase 15.0.30 / API v1.3 DirectAccess projection
+
+この節は同じC15-COMBINED physical runのDirectAccess projectionです。
 
 ### Lifecycleとtree
 
@@ -405,6 +483,7 @@ optional configの存在はInput / Output / VCAがruntimeで返る証拠では�
 | deactivate後のcallback有無 | `PENDING` | `PENDING` |
 | E0 root / child count | `PENDING` | `PENDING` |
 | E1 root / child count /順序 | `PENDING` | `PENDING` |
+| E8 root / child count /順序 | `PENDING` | `PENDING` |
 | C1 treeのscope、深さ、順序 | `PENDING` | `PENDING` |
 | Folder / hidden / Group / FX inclusion | `PENDING` | `PENDING` |
 | Input / Output / VCA inclusion | `PENDING` | `PENDING` |
@@ -440,55 +519,55 @@ optional configの存在はInput / Output / VCAがruntimeで返る証拠では�
 
 各checkpointはfixtureのM1手順どおりに分離し、selection準備操作をrename / add / deleteと同じwindowへ混ぜません。
 
-| checkpoint | 確認対象 | C13-MB | C15-MB | C15-DA |
-| --- | --- | --- | --- | --- |
-| S0 | C1初期snapshot、ID、state | `PENDING` | `PENDING` | `PENDING` |
-| S1-select | P10単独selection | `PENDING` | `PENDING` | `PENDING` |
-| S1-rename | title callback、ID寿命 | `PENDING` | `PENDING` | `PENDING` |
-| S2-select-anchor | P12単独selection | `PENDING` | `PENDING` | `PENDING` |
-| S2-add | add、自動selection、後続index | `PENDING` | `PENDING` | `PENDING` |
-| S3-select-delete | P11単独selection | `PENDING` | `PENDING` | `PENDING` |
-| S3-delete | removal、自動selection、後続index | `PENDING` | `PENDING` | `PENDING` |
-| S4-show | hidden P08をshow、bank / tree差分 | `PENDING` | `PENDING` | `PENDING` |
-| S5-select-anchor | P12比較元selection | `PENDING` | `PENDING` | `PENDING` |
-| S5-select-change | P12 false / P13 trueの順 | `PENDING` | `PENDING` | `PENDING` |
-| S6-mute | P04 muteと意図しないselection | `PENDING` | `PENDING` | `PENDING` |
-| S7-solo | P03 soloと意図しないselection | `PENDING` | `PENDING` | `PENDING` |
-| S8-project-only-hide | visibility同期off時のsurface分離 | `PENDING` | `PENDING` | `PENDING` |
-| S8-restore | 同期とP08 hiddenの原状回復 | `PENDING` | `PENDING` | `PENDING` |
-| S9-empty | E0へproject切替 | `PENDING` | `PENDING` | `PENDING` |
-| S9-mutation | M1へ戻る | `PENDING` | `PENDING` | `PENDING` |
-| S9-baseline | C1へ戻る | `PENDING` | `PENDING` | `PENDING` |
+| checkpoint | 確認対象 | C13-MB physical run | C13-DA conditional | C15-COMBINED: MB projection | C15-COMBINED: DA projection |
+| --- | --- | --- | --- | --- | --- |
+| S0 | C1初期snapshot、ID、state | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| S1-select | P10単独selection | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| S1-rename | title callback、ID寿命 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| S2-select-anchor | P12単独selection | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| S2-add | add、自動selection、後続index | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| S3-select-delete | P11単独selection | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| S3-delete | removal、自動selection、後続index | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| S4-show | hidden P08をshow、bank / tree差分 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| S5-select-anchor | P12比較元selection | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| S5-select-change | P12 false / P13 trueの順 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| S6-mute | P04 muteと意図しないselection | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| S7-solo | P03 soloと意図しないselection | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| S8-project-only-hide | visibility同期off時のsurface分離 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| S8-restore | 同期とP08 hiddenの原状回復 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| S9-empty | E0へproject切替 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| S9-mutation | M1へ戻る | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| S9-baseline | C1へ戻る | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
 
-R1 / R2のreconnect deadlineは既定`30000 ms`です。deadlineを延長して成功したように見せず、変更したrunはprimary comparisonから分離します。
+R1 / R2のreconnect deadlineはaction markerからreadyと再discover完了まで既定`30000 ms`です。final snapshotはmarkerから5000 ms以上かつready / discovery後に開始し、それらの完了から`10000 ms`以内に取得します。deadlineを延長して成功したように見せず、変更したrunはprimary comparisonから分離します。
 
-| phase | 確認対象 | C13-MB | C15-MB | C15-DA |
-| --- | --- | --- | --- | --- |
-| R1 pre-reload | session、ID alias、初期snapshot | `PENDING` | `PENDING` | `PENDING` |
-| R1 reload | clean `probe.ready(false)` / 新IDの`probe.loaded` seq 1 / `probe.mapping_active` / 初期snapshot / `probe.ready(true)`順 | `PENDING` | `PENDING` | `PENDING` |
-| R1 post-reload | 30秒以内のready、ID、初期callback | `PENDING` | `PENDING` | `PENDING` |
-| R2 pre-restart | session、ID alias、初期snapshot | `PENDING` | `PENDING` | `PENDING` |
-| R2 restart | 正常終了、新process、新session境界 | `PENDING` | `PENDING` | `PENDING` |
-| R2 post-restart | 30秒以内のready、ID、初期callback | `PENDING` | `PENDING` | `PENDING` |
+| phase | 確認対象 | C13-MB physical run | C13-DA conditional | C15-COMBINED: MB projection | C15-COMBINED: DA projection |
+| --- | --- | --- | --- | --- | --- |
+| R1 pre-reload | `S9-baseline` finalを参照 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| R1 reload | clean `probe.ready(false)` / 新IDの`probe.loaded` seq 1 / `probe.mapping_active` / 初期snapshot / `probe.ready(true)`順 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| R1 post-reload | 30秒以内のready、ID、初期callback | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| R2 pre-restart | R1 finalを参照 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| R2 restart | 正常終了、新process、新session境界 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| R2 post-restart | 30秒以内のready、ID、初期callback | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
 
 ## Access方式比較
 
 この表はruntime完了後にだけ更新します。静的なmethod存在だけで「可」にしません。
 
-| 判断項目 | C13 v1.1 Mixer Bank | C15 v1.3 Mixer Bank | C15 v1.3 DirectAccess |
-| --- | --- | --- | --- |
-| boundedな0件 / 1件 / 複数bank列挙 | `PENDING` | `PENDING` | `PENDING` |
-| 終端を重複・欠落なく判定 | `PENDING` | `PENDING` | `PENDING` |
-| 同名を分離するopaque ID | `PENDING` | `PENDING` | `PENDING` |
-| rename中のID一貫性 | `PENDING` | `PENDING` | `PENDING` |
-| title / Unicode保持 | `PENDING` | `PENDING` | `PENDING` |
-| typeを推測せず取得 | `PENDING` | `PENDING` | `PENDING`（v1.3だけ） |
-| selected / mute / solo初期値 | `PENDING` | `PENDING` | `PENDING` |
-| delayed / out-of-order callback耐性 | `PENDING` | `PENDING` | `PENDING` |
-| mutation中snapshotの失効検出 | `PENDING` | `PENDING` | `PENDING` |
-| hidden / zone / I/O scopeの明確さ | `PENDING` | `PENDING` | `PENDING` |
-| reload / restart後の回復 | `PENDING` | `PENDING` | `PENDING` |
-| API feature detectionによる安全なfallback | `PENDING` | `PENDING` | `PENDING` |
+| 判断項目 | C13 v1.1 Mixer Bank | C13 DirectAccess conditional | C15 v1.3 Mixer Bank | C15 v1.3 DirectAccess |
+| --- | --- | --- | --- | --- |
+| boundedな0件 / 1件 / 複数bank列挙 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| 終端を重複・欠落なく判定 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| 同名を分離するopaque ID | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| rename中のID一貫性 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| title / Unicode保持 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| typeを推測せず取得 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING`（v1.3だけ） |
+| selected / mute / solo初期値 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| delayed / out-of-order callback耐性 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| mutation中snapshotの失効検出 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| hidden / zone / I/O scopeの明確さ | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| reload / restart後の回復 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| API feature detectionによる安全なfallback | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
 
 ## 推奨方式の判定基準
 
@@ -497,7 +576,7 @@ R1 / R2のreconnect deadlineは既定`30000 ms`です。deadlineを延長して�
 Issue #4へ方式を提案するには、候補が次のgateをすべて満たす必要があります。
 
 1. **観測integrity**: callback windowとsequence検査を通過し、drop、duplicate、逆順、orphanがない。
-2. **bounded completeness**: E0、E1、bank幅ちょうど、bank幅超過、最終partial pageで、有限回の操作から重複・欠落なく終端を判定できる。
+2. **bounded completeness**: E0、E1、E8のbank幅ちょうど、C1のbank幅超過と最終partial pageで、有限回の操作から重複・欠落なく終端を判定できる。
 3. **opaque identity**: 同名Trackを区別でき、name、index、type、routingからIDを合成しない。ID寿命をsession / rename / project / reload / restart単位で明記できる。
 4. **truthful metadata**: titleとstateの初期値到着前をreadyにせず、取得不能なtypeやstateを推測しない。
 5. **snapshot consistency**: add / rename / delete / visibility / state変更中に異なる時点のTrackを正常な単一snapshotへ混ぜない。変更検知またはgeneration失効を実装できる。
@@ -515,10 +594,11 @@ Issue #4へ方式を提案するには、候補が次のgateをすべて満た�
 ## Issue #3完了checklist
 
 - [ ] Cubase 13.0.30とCubase 15について、edition / version / build、MIDI Remote API、OS / build / architectureをruntime runごとに記録した
-- [ ] repository commitとprobe source / deployed digestが一致している
-- [ ] fixture E0 / E1 / C1 / M1、R1 / R2、必要に応じO1を再現した
-- [ ] C13 Mixer BankとC15 Mixer Bank / DirectAccessの完全な観測tableがある
-- [ ] callback windowとsequence gap判定を全checkpointへ適用した
+- [ ] repository commit、collector binary digestを固定し、probe source / installer embedded / deployedの3 digestが一致している
+- [ ] fixture revision 2のE0 / E1 / E8 / C1 / M1、R1 / R2を再現し、audit v1のO1は`skipped / not_separately_authorized`にした
+- [ ] C13 Mixer Bankのphysical runと、C15 Mixer Bank / DirectAccessを同時取得した単一physical runの完全な観測tableがある
+- [ ] 各profileのexactly 44 checkpointについて、cut対象では成功response直後のatomic pairに同request / epochの自動action markerがあり、manual markerを重ねず、その直後にUI操作を行い、種別ごとの観測anchorから5000 ms以上の観測、明示的final snapshot、その後にmessageがない追加1000 ms quiet period、UI annotation、sequence gap判定を適用した
+- [ ] redacted reportがraw run IDの`run-<16-hex>` alias、raw / manifest digest、allowlist済みsemantic projection、run-local ID aliasを含み、raw run ID / raw host ID / path / port / unknown titleを含まない
 - [ ] 同名、Unicode、長い名前、hidden、Folder、複数type、bank幅超過をUI ground truthと比較した
 - [ ] add / rename / delete / selection / mute / solo / visibility / project切替を個別windowで観測した
 - [ ] ID寿命、callback順、空slot、bank終端、tree scopeを観測値と未確認事項に分けた

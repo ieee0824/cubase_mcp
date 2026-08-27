@@ -66,4 +66,6 @@ jobs:
 
       - name: Test Cubase MIDI Remote script
         if: runner.os == 'Linux'
-        run: node tests/midi_remote_script.test.js
+        run: |
+          node tests/midi_remote_script.test.js
+          node tests/track_probe_script.test.js

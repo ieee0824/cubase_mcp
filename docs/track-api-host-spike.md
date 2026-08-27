@@ -260,6 +260,8 @@ targeted requestは、同じrequest IDに対する同じ`source_instance_id`か�
 
 `probe.overflow`はsource queue、outbound frame、host-ID fragment上限、snapshot queue、deactivation時の未送信破棄を含め、理由を問わずrun fatalです。raw logの`collector_summary`が`integrity_ok: true`かつ`exit_ok: true`でないrunを`OBSERVED`へ使いません。
 
+Cubaseは新しく現れたMIDI outputを検出するため、Universal Non-Realtime broadcast Identity Requestのexact 6 byte `F0 7E 7F 06 01 F7`を専用virtual portへ反復送信する場合があります。collectorはSysEx reassembly後、このexact frameだけをProbe transport外の標準検出trafficとしてingress / quiet-period計数前に無視します。device ID、Sub-ID、長さ、終端を含む1 byteでも異なるframeやその他のforeign SysExは従来どおりfatalです。この検出trafficをProbe message、callback不存在、source sequence、checkpoint activityの証拠へ数えません。
+
 ### runtime run手順template
 
 この手順はruntime artifactを作成しますが、本revisionではまだ実施していません。

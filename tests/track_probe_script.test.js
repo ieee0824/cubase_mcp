@@ -41,17 +41,21 @@ function graphMetadata(graph, objectId) {
 
 function makeDirectAccessMock(options, calls) {
     const graph = options.graph || { base: 0, children: { 0: [] }, metadata: {} }
+    const externalError = options.externalErrorCanary || null
     const directAccess = {
         mOnObjectChange() {},
         mOnObjectWillBeRemoved() {},
         mOnParameterChange() {},
         activate(activeMapping) {
             calls.directActivate.push(activeMapping)
+            if (options.directActivateThrows) {
+                throw new Error(externalError || 'direct activate failed')
+            }
         },
         update(activeMapping) {
             calls.directUpdate.push(activeMapping)
             if (options.directUpdateThrows) {
-                throw new Error('direct update failed')
+                throw new Error(externalError || 'direct update failed')
             }
             if (options.directUpdateObjectChange !== undefined) {
                 this.mOnObjectChange(
@@ -64,7 +68,7 @@ function makeDirectAccessMock(options, calls) {
         deactivate(activeMapping) {
             calls.directDeactivate.push(activeMapping)
             if (options.directDeactivateThrows) {
-                throw new Error('direct deactivate failed')
+                throw new Error(externalError || 'direct deactivate failed')
             }
         },
         getBaseObjectID(activeMapping) {
@@ -74,7 +78,7 @@ function makeDirectAccessMock(options, calls) {
         getNumberOfChildObjects(activeMapping, objectId) {
             calls.directGetters.push(['childCount', objectId])
             if (options.throwChildCountFor === objectId) {
-                throw new Error('child count failed')
+                throw new Error(externalError || 'child count failed')
             }
             if (
                 options.childCountOverrides &&
@@ -92,7 +96,7 @@ function makeDirectAccessMock(options, calls) {
                 options.throwChildId.objectId === objectId &&
                 options.throwChildId.childIndex === childIndex
             ) {
-                throw new Error('child ID failed')
+                throw new Error(externalError || 'child ID failed')
             }
             if (
                 options.childIdOverrides &&
@@ -105,42 +109,42 @@ function makeDirectAccessMock(options, calls) {
         getObjectUniqueName(activeMapping, objectId) {
             calls.directGetters.push(['uniqueName', objectId])
             if (options.throwMetadata) {
-                throw new Error(`uniqueName-${'x'.repeat(300)}`)
+                throw new Error(externalError || `uniqueName-${'x'.repeat(300)}`)
             }
             return graphMetadata(graph, objectId).uniqueName
         },
         getObjectUniqueIDString(activeMapping, objectId) {
             calls.directGetters.push(['uniqueId', objectId])
             if (options.throwMetadata) {
-                throw new Error(`uniqueId-${'x'.repeat(300)}`)
+                throw new Error(externalError || `uniqueId-${'x'.repeat(300)}`)
             }
             return graphMetadata(graph, objectId).uniqueId
         },
         getObjectTitle(activeMapping, objectId) {
             calls.directGetters.push(['title', objectId])
             if (options.throwMetadata) {
-                throw new Error(`title-${'x'.repeat(300)}`)
+                throw new Error(externalError || `title-${'x'.repeat(300)}`)
             }
             return graphMetadata(graph, objectId).title
         },
         isMixerChannelVisible(activeMapping, objectId) {
             calls.directGetters.push(['visible', objectId])
             if (options.throwMetadata) {
-                throw new Error(`visible-${'x'.repeat(300)}`)
+                throw new Error(externalError || `visible-${'x'.repeat(300)}`)
             }
             return graphMetadata(graph, objectId).visible
         },
         getMixerChannelIndex(activeMapping, objectId) {
             calls.directGetters.push(['index', objectId])
             if (options.throwMetadata) {
-                throw new Error(`index-${'x'.repeat(300)}`)
+                throw new Error(externalError || `index-${'x'.repeat(300)}`)
             }
             return graphMetadata(graph, objectId).index
         },
         getMixerChannelZone(activeMapping, objectId) {
             calls.directGetters.push(['zone', objectId])
             if (options.throwMetadata) {
-                throw new Error(`zone-${'x'.repeat(300)}`)
+                throw new Error(externalError || `zone-${'x'.repeat(300)}`)
             }
             return graphMetadata(graph, objectId).zone
         }
@@ -150,10 +154,13 @@ function makeDirectAccessMock(options, calls) {
         directAccess.getObjectTypeName = function (activeMapping, objectId) {
             calls.directGetters.push(['type', objectId])
             if (options.throwMetadata) {
-                throw new Error(`type-${'x'.repeat(300)}`)
+                throw new Error(externalError || `type-${'x'.repeat(300)}`)
             }
             return graphMetadata(graph, objectId).type
         }
+    }
+    if (options.omitDirectUniqueName) {
+        delete directAccess.getObjectUniqueName
     }
     return directAccess
 }
@@ -207,7 +214,9 @@ function createHarness(options = {}) {
                     options.bankActionThrows.configId === configId &&
                     options.bankActionThrows.actionName === actionName
                 ) {
-                    throw new Error('bank action failed')
+                    throw new Error(
+                        options.externalErrorCanary || 'bank action failed'
+                    )
                 }
             }
         }
@@ -227,6 +236,11 @@ function createHarness(options = {}) {
         if (options.bankUniqueIds) {
             channel.getUniqueIDString = function (mapping) {
                 assert.equal(mapping, activeMapping)
+                if (options.bankUniqueIdThrows) {
+                    throw new Error(
+                        options.externalErrorCanary || 'bank unique ID failed'
+                    )
+                }
                 if (options.bankUniqueIdFactory) {
                     return options.bankUniqueIdFactory(configId, slotIndex)
                 }
@@ -313,6 +327,11 @@ function createHarness(options = {}) {
         directAccess = makeDirectAccessMock(options, calls)
         hostAccess.makeDirectAccess = function (target) {
             calls.directFactoryTargets.push(target)
+            if (options.directFactoryThrows) {
+                throw new Error(
+                    options.externalErrorCanary || 'direct factory failed'
+                )
+            }
             return directAccess
         }
     }
@@ -492,6 +511,21 @@ function assertSourceSequence(harness) {
     }
 }
 
+function serializedEnvelopes(harness) {
+    return envelopes(harness).map(envelope => JSON.stringify(envelope)).join('\n')
+}
+
+function assertSerializedSecretsAbsent(harness, secrets) {
+    const serialized = serializedEnvelopes(harness)
+    for (const secret of secrets) {
+        assert.equal(
+            serialized.includes(secret),
+            false,
+            `serialized probe frame leaked ${secret}`
+        )
+    }
+}
+
 function resolveHostId(mainItem, allItems) {
     if (mainItem.host_id_raw !== null) {
         return mainItem.host_id_raw
@@ -519,9 +553,13 @@ function testStaticES5AndIdentity() {
     assert.equal((withoutComments.match(/`/g) || []).length, 0)
     assert.doesNotMatch(source, /\.mTransport\b/)
     assert.doesNotMatch(source, /setParameter(?:Process|Display)Value/)
+    assert.doesNotMatch(source, /MB_OPTIONAL_(?:MAIN|LEFT|RIGHT)/)
+    assert.doesNotMatch(source, /\bmakeOptionalBankConfig\b/)
+    assert.doesNotMatch(source, /safeErrorMessage|error\.message|String\(error\)/)
     assert.doesNotThrow(() => new vm.Script(source))
 
     const harness = createHarness()
+    assert.equal(harness.context.makeOptionalBankConfig, undefined)
     assert.deepEqual(harness.calls.driverArgs, [
         'CubaseMCPTrackProbe',
         'CubaseMCPTrackProbe',
@@ -540,16 +578,13 @@ function testStaticES5AndIdentity() {
 
 function testApi11MixerBanksCommandsAndOverflow() {
     const harness = createHarness()
-    assert.equal(harness.zones.length, 5)
+    assert.equal(harness.zones.length, 2)
     assert.deepEqual(harness.zones.map(zone => zone.configId), [
         'MB_CORE_ALL',
-        'MB_CORE_VISIBLE',
-        'MB_OPTIONAL_MAIN',
-        'MB_OPTIONAL_LEFT',
-        'MB_OPTIONAL_RIGHT'
+        'MB_CORE_VISIBLE'
     ])
-    assert.deepEqual(harness.zones.map(zone => zone.channels.length), [8, 8, 8, 8, 8])
-    assert.equal(harness.calls.bindings.length, 120)
+    assert.deepEqual(harness.zones.map(zone => zone.channels.length), [8, 8])
+    assert.equal(harness.calls.bindings.length, 48)
 
     const expectedFilters = [
         'includeAudioChannels',
@@ -575,43 +610,6 @@ function testApi11MixerBanksCommandsAndOverflow() {
     assert.deepEqual(harness.zones[0].filterCalls.at(-1), ['setFollowVisibility', false])
     assert.deepEqual(harness.zones[1].filterCalls.at(-1), ['setFollowVisibility', true])
 
-    const optionalTypeFilters = [
-        'excludeAudioChannels',
-        'excludeInstrumentChannels',
-        'excludeSamplerChannels',
-        'excludeMIDIChannels',
-        'excludeGroupChannels',
-        'excludeFXChannels',
-        'includeVCAChannels',
-        'includeInputChannels',
-        'includeOutputChannels'
-    ]
-    assert.deepEqual(
-        harness.zones[2].filterCalls.slice(0, -1).map(call => call[0]),
-        optionalTypeFilters.concat([
-            'excludeWindowZoneLeftChannels',
-            'excludeWindowZoneRightChannels'
-        ])
-    )
-    assert.deepEqual(
-        harness.zones[3].filterCalls.slice(0, -1).map(call => call[0]),
-        optionalTypeFilters.concat([
-            'includeWindowZoneLeftChannels',
-            'excludeWindowZoneRightChannels'
-        ])
-    )
-    assert.deepEqual(
-        harness.zones[4].filterCalls.slice(0, -1).map(call => call[0]),
-        optionalTypeFilters.concat([
-            'includeWindowZoneRightChannels',
-            'excludeWindowZoneLeftChannels'
-        ])
-    )
-    assert.ok(harness.zones.slice(2).every(zone =>
-        zone.filterCalls.at(-1)[0] === 'setFollowVisibility' &&
-        zone.filterCalls.at(-1)[1] === false
-    ))
-
     harness.activate()
     const loaded = events(harness, 'probe.loaded').at(-1)
     const capability = events(harness, 'probe.capabilities').at(-1)
@@ -620,12 +618,30 @@ function testApi11MixerBanksCommandsAndOverflow() {
     assert.equal(capability.data.direct_access.supported, false)
     assert.equal(capability.data.mixer_bank.slot_count, 8)
     assert.equal(capability.data.mixer_bank.explicit_main_filter, false)
+    assert.deepEqual(
+        JSON.parse(JSON.stringify(capability.data.data_minimization)),
+        {
+            source_redaction: true,
+            fixture_revision: 2,
+            unknown_titles: 'redacted',
+            unknown_host_ids: 'omitted',
+            unique_name_policy: 'not_invoked',
+            exception_text: 'fixed_codes'
+        }
+    )
+    assert.deepEqual(
+        JSON.parse(JSON.stringify(capability.data.observation_epoch)),
+        {
+            supported: true,
+            version: 1,
+            current: 0,
+            max: 2147483647,
+            rollover_policy: 'reload_required'
+        }
+    )
     assert.deepEqual(Array.from(capability.data.mixer_bank.configs), [
         'MB_CORE_ALL',
-        'MB_CORE_VISIBLE',
-        'MB_OPTIONAL_MAIN',
-        'MB_OPTIONAL_LEFT',
-        'MB_OPTIONAL_RIGHT'
+        'MB_CORE_VISIBLE'
     ])
 
     harness.idle(5)
@@ -644,16 +660,25 @@ function testApi11MixerBanksCommandsAndOverflow() {
         assert.ok(chunks.every(chunk => chunk.data.chunk_count === 4))
         assert.equal(chunks.flatMap(chunk => chunk.data.items).length, 8)
     }
+    assert.deepEqual(
+        Array.from(new Set(events(harness, 'probe.bank.chunk')
+            .filter(event =>
+                event.data.stream === 'mixer_bank_snapshot' &&
+                event.data.reason === 'page_activate'
+            )
+            .map(event => event.data.config_id))),
+        ['MB_CORE_ALL', 'MB_CORE_VISIBLE']
+    )
 
     const slot = harness.context.bankConfigs[0].slots[0]
     slot.channel.mOnTitleChange(
         harness.activeDevice,
         harness.activeMapping,
-        'Vocal_日本語_🎛️'
+        'CMCP_E1_ONLY_AUDIO'
     )
     slot.selected_feedback.mOnTitleChange(
         harness.activeDevice,
-        'Vocal_日本語_🎛️',
+        'CMCP_E1_ONLY_AUDIO',
         'Selected'
     )
     slot.selected_feedback.mOnProcessValueChange(harness.activeDevice, 1, 0)
@@ -673,7 +698,9 @@ function testApi11MixerBanksCommandsAndOverflow() {
         'mute',
         'solo'
     ])
-    assert.equal(feedback[0].title, 'Vocal_日本語_🎛️')
+    assert.equal(feedback[0].title, 'CMCP_E1_ONLY_AUDIO')
+    assert.equal(feedback[0].title_redacted, false)
+    assert.equal(feedback[0].redacted_string_count, 0)
     assert.deepEqual(feedback.slice(0, 2).map(item => item.callback_source), [
         'mixer_bank_channel',
         'selected_binding'
@@ -769,7 +796,7 @@ function testActivationBurstFitsBoundedFeedbackQueue() {
         }
     }
 
-    assert.equal(harness.context.pendingFeedback.length, 200)
+    assert.equal(harness.context.pendingFeedback.length, 80)
     assert.equal(events(harness, 'probe.overflow').length, 0)
     harness.idle(8)
 
@@ -778,7 +805,7 @@ function testActivationBurstFitsBoundedFeedbackQueue() {
         'probe.bank.chunk',
         data => data.stream === 'mixer_bank_feedback'
     )
-    assert.equal(feedback.length, 200)
+    assert.equal(feedback.length, 80)
     assert.equal(events(harness, 'probe.overflow').length, 0)
     assert.equal(events(harness, 'probe.ready').at(-1).data.ready, true)
     assert.equal(
@@ -991,6 +1018,744 @@ function testFeedbackStreamsPreserveCallbackArrivalOrder() {
     assertSourceSequence(harness)
 }
 
+function testObservationEpochCutValidationAndExhaustion() {
+    const initializing = createHarness()
+    initializing.activate()
+    request(initializing, 'cut-before-ready', 'probe.observation.cut')
+    assert.equal(response(initializing, 'cut-before-ready').error.code, 'BUSY')
+    assert.equal(initializing.context.observationEpoch, 0)
+
+    const harness = createHarness()
+    harness.activate()
+    harness.idle(5)
+
+    for (const [id, params] of [
+        ['cut-extra-param', { unexpected: true }],
+        ['cut-array-param', []],
+        ['cut-null-param', null],
+        ['cut-number-param', 1]
+    ]) {
+        request(harness, id, 'probe.observation.cut', params)
+        assert.equal(response(harness, id).error.code, 'INVALID_ARGUMENT')
+        assert.equal(harness.context.observationEpoch, 0)
+    }
+
+    request(harness, 'cut-one', 'probe.observation.cut')
+    assert.deepEqual(response(harness, 'cut-one').result, {
+        observation_epoch: 1
+    })
+    assert.equal(harness.context.observationEpoch, 1)
+    request(harness, 'epoch-capabilities', 'probe.capabilities.get')
+    assert.equal(
+        response(harness, 'epoch-capabilities').result.observation_epoch.current,
+        1
+    )
+    request(harness, 'cut-two', 'probe.observation.cut')
+    assert.equal(response(harness, 'cut-two').result.observation_epoch, 2)
+    assert.equal(harness.context.observationEpoch, 2)
+    assertSourceSequence(harness)
+
+    const exhausted = createHarness()
+    exhausted.activate()
+    exhausted.idle(5)
+    exhausted.context.observationEpoch = exhausted.context.MAX_OBSERVATION_EPOCH
+    request(exhausted, 'cut-exhausted', 'probe.observation.cut')
+    assert.equal(response(exhausted, 'cut-exhausted').error.code, 'PROTOCOL_ERROR')
+    assert.equal(
+        exhausted.context.observationEpoch,
+        exhausted.context.MAX_OBSERVATION_EPOCH
+    )
+    assert.equal(exhausted.context.pageIsReady, false)
+    const overflow = events(exhausted, 'probe.overflow').find(event =>
+        event.data.stream === 'observation_epoch'
+    )
+    assert.equal(overflow.data.error_code, 'epoch_exhausted')
+    assert.equal(overflow.data.rollover_policy, 'reload_required')
+    assert.equal(
+        overflow.data.max_observation_epoch,
+        exhausted.context.MAX_OBSERVATION_EPOCH
+    )
+    assertSourceSequence(exhausted)
+}
+
+function testObservationEpochPreservesQueuedCallbackCut() {
+    const ambientTitleCanary = 'CMCP_NOT_ALLOWED_github_pat_epoch_title'
+    const ambientIdCanary = 'sk-epoch-ambient-host-id'
+    const fixtureId = 'fixture-epoch-host-id'
+    let currentHostId = ambientIdCanary
+    let hostIdGetterCalls = 0
+    const harness = createHarness({
+        directAccessVersion: '1.3',
+        bankUniqueIds: true,
+        bankUniqueIdFactory() {
+            hostIdGetterCalls += 1
+            return currentHostId
+        },
+        graph: {
+            base: 0,
+            children: { 0: [] },
+            metadata: {
+                0: {
+                    uniqueName: 'hidden-epoch-unique-name',
+                    uniqueId: 'fixture-direct-epoch-id',
+                    title: 'CMCP_E1_ONLY_AUDIO',
+                    type: 'AudioChannel',
+                    visible: true,
+                    index: 0,
+                    zone: 0
+                }
+            }
+        }
+    })
+    harness.activate()
+    harness.idle(5)
+    const slot = harness.context.bankConfigs[0].slots[0]
+    const beforeQueuedCallbacks = messages(harness).length
+
+    slot.channel.mOnTitleChange(
+        harness.activeDevice,
+        harness.activeMapping,
+        ambientTitleCanary
+    )
+    slot.selected_feedback.mOnProcessValueChange(harness.activeDevice, 1, 0)
+    harness.directAccess.mOnObjectChange(
+        harness.activeDevice,
+        harness.activeMapping,
+        0
+    )
+    assert.equal(harness.context.pendingFeedback.length, 3)
+    assert.equal(hostIdGetterCalls, 0)
+
+    request(harness, 'epoch-cut', 'probe.observation.cut')
+    assert.equal(response(harness, 'epoch-cut').result.observation_epoch, 1)
+    assert.equal(harness.context.pendingFeedback.length, 3)
+
+    currentHostId = fixtureId
+    slot.channel.mOnTitleChange(
+        harness.activeDevice,
+        harness.activeMapping,
+        'CMCP_E1_ONLY_AUDIO'
+    )
+    slot.mute_feedback.mOnProcessValueChange(harness.activeDevice, 1, 0)
+    harness.directAccess.mOnParameterChange(
+        harness.activeDevice,
+        harness.activeMapping,
+        0,
+        19
+    )
+    assert.equal(hostIdGetterCalls, 1)
+
+    request(harness, 'epoch-bank-final', 'probe.bank.snapshot', {
+        config_id: 'MB_CORE_ALL'
+    })
+    request(harness, 'epoch-da-final', 'probe.direct_access.snapshot')
+    harness.idle(8)
+
+    const afterCutMessages = messages(harness).slice(beforeQueuedCallbacks)
+    const cutResponseIndex = afterCutMessages.findIndex(message =>
+        message.id === 'epoch-cut'
+    )
+    const firstFeedbackIndex = afterCutMessages.findIndex(message =>
+        message.type === 'event' &&
+        message.data &&
+        (
+            message.data.stream === 'mixer_bank_feedback' ||
+            message.data.stream === 'direct_access_feedback'
+        )
+    )
+    assert.ok(cutResponseIndex >= 0)
+    assert.ok(firstFeedbackIndex > cutResponseIndex)
+
+    const bankFeedback = eventItems(
+        harness,
+        'probe.bank.chunk',
+        data => data.stream === 'mixer_bank_feedback'
+    ).filter(item => item.record_kind === 'observation')
+    const oldTitle = bankFeedback.find(item =>
+        item.changed_field === 'title' && item.observation_epoch === 0
+    )
+    assert.ok(oldTitle)
+    assert.equal(oldTitle.title, null)
+    assert.equal(oldTitle.changed_value, null)
+    assert.equal(oldTitle.changed_value_redacted, true)
+    assert.equal(oldTitle.observation_epoch_status, 'callback_observed')
+    assert.equal(oldTitle.field_last_observation_epoch.title, 0)
+    assert.equal(oldTitle.field_last_observation_epoch.host_id_raw, null)
+    const oldSelected = bankFeedback.find(item =>
+        item.changed_field === 'selected'
+    )
+    assert.equal(oldSelected.observation_epoch, 0)
+    assert.equal(oldSelected.field_last_observation_epoch.selected, 0)
+
+    const newTitle = bankFeedback.find(item =>
+        item.changed_field === 'title' && item.observation_epoch === 1
+    )
+    assert.ok(newTitle)
+    assert.equal(newTitle.title, 'CMCP_E1_ONLY_AUDIO')
+    assert.equal(newTitle.host_id_raw, fixtureId)
+    assert.equal(newTitle.field_last_observation_epoch.title, 1)
+    assert.equal(newTitle.field_last_observation_epoch.host_id_raw, 1)
+    assert.equal(
+        newTitle.field_last_observation_seq.host_id_raw,
+        newTitle.observation_seq
+    )
+    const newMute = bankFeedback.find(item => item.changed_field === 'mute')
+    assert.equal(newMute.observation_epoch, 1)
+    assert.equal(newMute.field_last_observation_epoch.mute, 1)
+
+    const bankFinalItems = eventItems(
+        harness,
+        'probe.bank.chunk',
+        data =>
+            data.stream === 'mixer_bank_snapshot' &&
+            data.config_id === 'MB_CORE_ALL' &&
+            data.reason === 'command_snapshot'
+    )
+    const bankFinal = bankFinalItems.find(item =>
+        item.record_kind === 'observation' && item.slot_index === 0
+    )
+    assert.equal(bankFinal.field_last_observation_epoch.selected, 0)
+    assert.equal(bankFinal.field_last_observation_epoch.title, 1)
+    assert.equal(bankFinal.field_last_observation_epoch.host_id_raw, 1)
+    assert.equal(bankFinal.field_last_observation_epoch.mute, 1)
+    assert.equal(resolveHostId(bankFinal, bankFinalItems), fixtureId)
+    assert.equal(hostIdGetterCalls, 1)
+
+    const directFeedback = eventItems(
+        harness,
+        'probe.direct_access.chunk',
+        data => data.stream === 'direct_access_feedback'
+    )
+    const oldDirect = directFeedback.find(item => item.change === 'object_change')
+    const newDirect = directFeedback.find(item => item.change === 'parameter_change')
+    assert.equal(oldDirect.observation_epoch, 0)
+    assert.equal(oldDirect.observation_epoch_status, 'callback_observed')
+    assert.equal(newDirect.observation_epoch, 1)
+    assert.equal(newDirect.observation_epoch_status, 'callback_observed')
+
+    const directFinalEvents = events(harness, 'probe.direct_access.chunk').filter(event =>
+        event.data.stream === 'direct_access_snapshot' &&
+        event.data.reason === 'command_snapshot'
+    )
+    assert.ok(directFinalEvents.length > 0)
+    assert.ok(directFinalEvents.every(event =>
+        event.data.observation_epoch === 1 &&
+        event.data.observation_epoch_status === 'snapshot_observed'
+    ))
+    const directFinal = directFinalEvents
+        .flatMap(event => event.data.items)
+        .find(item => item.record_kind === 'observation')
+    assert.equal(directFinal.observation_epoch, 1)
+    assert.equal(directFinal.observation_epoch_status, 'snapshot_observed')
+
+    assertSerializedSecretsAbsent(harness, [
+        ambientTitleCanary,
+        ambientIdCanary,
+        'hidden-epoch-unique-name'
+    ])
+    assertSourceSequence(harness)
+}
+
+function testFixtureTitleAllowlistIsExactAndBounded() {
+    const harness = createHarness()
+    const allowed = [
+        'CMCP_E1_ONLY_AUDIO',
+        'CMCP_E8_01',
+        'CMCP_E8_02',
+        'CMCP_E8_03',
+        'CMCP_E8_04',
+        'CMCP_E8_05',
+        'CMCP_E8_06',
+        'CMCP_E8_07',
+        'CMCP_E8_08',
+        'CMCP_01_FOLDER_EMPTY',
+        'CMCP_DUPLICATE',
+        'CMCP_04_MIDI_ASCII',
+        'CMCP_05_日本語_é_🎹',
+        'CMCP_05_日本語_e\u0301_🎹',
+        'CMCP_06_GROUP',
+        'CMCP_07_FX',
+        'CMCP_08_HIDDEN',
+        'CMCP_10_MUTATE_RENAME',
+        'CMCP_11_MUTATE_DELETE',
+        'CMCP_12_MUTATION_ANCHOR',
+        'CMCP_13_STATE_S0_M0_SO0',
+        'CMCP_14_STATE_S0_M0_SO1',
+        'CMCP_15_STATE_S0_M1_SO0',
+        'CMCP_16_STATE_S0_M1_SO1',
+        'CMCP_17_STATE_S1_M0_SO0',
+        'CMCP_18_STATE_S1_M0_SO1',
+        'CMCP_19_STATE_S1_M1_SO0',
+        'CMCP_20_STATE_S1_M1_SO1',
+        'CMCP_10_RENAMED_変更後',
+        'CMCP_21_ADDED'
+    ]
+    for (const title of allowed) {
+        assert.equal(harness.context.fixtureTitleIsAllowed(title), true, title)
+    }
+
+    const p09 =
+        'CMCP_09_LONG_ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNO'
+    assert.equal(harness.context.fixtureTitleIsAllowed('CMCP_09_LONG_'), true)
+    assert.equal(harness.context.fixtureTitleIsAllowed(p09.slice(0, 40)), true)
+    assert.equal(harness.context.fixtureTitleIsAllowed(p09), true)
+
+    for (const title of [
+        '',
+        'C',
+        'CMCP',
+        'CMCP_',
+        'CMCP_09_LONG',
+        `${p09}X`,
+        'CMCP_SECRET_NOT_ALLOWLISTED',
+        'CMCP_OPT_INPUT',
+        'CMCP_OPT_OUTPUT',
+        'CMCP_OPT_VCA',
+        'CMCP_TrackFixture_Empty'
+    ]) {
+        assert.equal(harness.context.fixtureTitleIsAllowed(title), false, title)
+    }
+}
+
+function testMixerBankSourceRedactionAndFixtureIdFragments() {
+    const ambientTitleCanary = 'CMCP_NOT_ALLOWLISTED_ghp_bank_title_secret'
+    const ambientBindingCanary = 'github_pat_bank_binding_secret'
+    const ambientHostIdCanary = 'sk-bank-host-id-secret'
+    const fixtureHostId = `fixture-bank-${'A'.repeat(600)}`
+    let currentHostId = ambientHostIdCanary
+    let hostIdGetterCalls = 0
+    const harness = createHarness({
+        bankUniqueIds: true,
+        bankUniqueIdFactory() {
+            hostIdGetterCalls += 1
+            return currentHostId
+        }
+    })
+    harness.activate()
+    const slot = harness.context.bankConfigs[0].slots[0]
+    slot.channel.mOnTitleChange(
+        harness.activeDevice,
+        harness.activeMapping,
+        ambientTitleCanary
+    )
+    slot.selected_feedback.mOnTitleChange(
+        harness.activeDevice,
+        'CMCP',
+        ambientBindingCanary
+    )
+    slot.selected_feedback.mOnProcessValueChange(harness.activeDevice, 1, 0)
+    harness.idle(5)
+
+    assert.equal(hostIdGetterCalls, 0)
+    const ambientItems = eventItems(
+        harness,
+        'probe.bank.chunk',
+        data => data.stream === 'mixer_bank_feedback'
+    ).filter(item => item.record_kind === 'observation')
+    assert.ok(ambientItems.length >= 3)
+    assert.ok(ambientItems.every(item => item.title === null))
+    assert.ok(ambientItems.every(item => item.host_id_raw === null))
+    assert.ok(ambientItems.every(item => item.title_redacted === true))
+    assert.ok(ambientItems.every(item => item.host_id_redacted === true))
+    assert.ok(ambientItems.every(item => item.redacted_string_count === 2))
+    assert.equal(ambientItems.at(-1).selected, true)
+    const ambientTitleItems = ambientItems.filter(item =>
+        item.changed_field === 'title'
+    )
+    assert.ok(ambientTitleItems.every(item => item.changed_value === null))
+    assert.ok(ambientTitleItems.every(item => item.changed_value_redacted === true))
+    const ambientSnapshotItem = eventItems(
+        harness,
+        'probe.bank.chunk',
+        data =>
+            data.stream === 'mixer_bank_snapshot' &&
+            data.config_id === 'MB_CORE_ALL' &&
+            data.reason === 'page_activate'
+    ).find(item => item.record_kind === 'observation' && item.slot_index === 0)
+    assert.equal(
+        ambientSnapshotItem.host_id_observed_with_title_callback,
+        false
+    )
+    assert.equal(
+        ambientSnapshotItem.host_id_observation_status,
+        'title_not_authorized'
+    )
+    assertSerializedSecretsAbsent(harness, [
+        ambientTitleCanary,
+        ambientBindingCanary,
+        ambientHostIdCanary
+    ])
+
+    currentHostId = fixtureHostId
+    slot.channel.mOnTitleChange(
+        harness.activeDevice,
+        harness.activeMapping,
+        'CMCP_E1_ONLY_AUDIO'
+    )
+    harness.idle()
+    assert.equal(hostIdGetterCalls, 1)
+    const fixtureWireItems = eventItems(
+        harness,
+        'probe.bank.chunk',
+        data => data.stream === 'mixer_bank_feedback'
+    )
+    const fixtureItem = fixtureWireItems.find(item =>
+        item.record_kind === 'observation' && item.title === 'CMCP_E1_ONLY_AUDIO'
+    )
+    assert.ok(fixtureItem)
+    assert.equal(fixtureItem.title_redacted, false)
+    assert.equal(fixtureItem.host_id_redacted, false)
+    assert.equal(fixtureItem.redacted_string_count, 0)
+    assert.equal(resolveHostId(fixtureItem, fixtureWireItems), fixtureHostId)
+    assert.ok(fixtureItem.host_id_fragment_count > 1)
+    assert.equal(fixtureItem.host_id_observed_with_title_callback, true)
+    assert.equal(
+        fixtureItem.host_id_observation_status,
+        'observed_with_title_callback'
+    )
+    assert.equal(
+        fixtureItem.field_last_observation_seq.host_id_raw,
+        fixtureItem.observation_seq
+    )
+
+    currentHostId = ambientHostIdCanary
+    request(harness, 'privacy-bank-snapshot', 'probe.bank.snapshot', {
+        config_id: 'MB_CORE_ALL'
+    })
+    harness.idle()
+    assert.equal(hostIdGetterCalls, 1)
+    const snapshotWireItems = eventItems(
+        harness,
+        'probe.bank.chunk',
+        data =>
+            data.stream === 'mixer_bank_snapshot' &&
+            data.config_id === 'MB_CORE_ALL' &&
+            data.reason === 'command_snapshot'
+    )
+    const snapshotItem = snapshotWireItems.find(item =>
+        item.record_kind === 'observation' && item.slot_index === 0
+    )
+    assert.equal(snapshotItem.host_id_observed_with_title_callback, true)
+    assert.equal(
+        snapshotItem.host_id_observation_status,
+        'observed_with_title_callback'
+    )
+    assert.equal(
+        snapshotItem.field_last_observation_seq.host_id_raw,
+        fixtureItem.observation_seq
+    )
+    assert.equal(resolveHostId(snapshotItem, snapshotWireItems), fixtureHostId)
+    assertSerializedSecretsAbsent(harness, [ambientHostIdCanary])
+    assertSourceSequence(harness)
+}
+
+function testDirectAccessSourceRedactionAndFixtureIdFragments() {
+    const ambientTitleCanary = 'Input github_pat_da_title_secret'
+    const ambientUniqueNameCanary = 'ghp_da_unique_name_secret'
+    const ambientHostIdCanary = 'sk-da-host-id-secret'
+    const ambientTypeCanary = 'PrivateType_secret'
+    const rejectedPrefixSecret = 'CMCP'
+    const rejectedPrefixHostIdCanary = 'github_pat_short_prefix_id_secret'
+    const fixtureFragmentedId = `fixture-direct-${'同じID'.repeat(120)}`
+    const p09Prefix = 'CMCP_09_LONG_ABCDEFGHIJKLMNO'
+    const graph = {
+        base: 0,
+        children: {
+            0: [1, 2, 3, 4, 5, 6, 7, 8],
+            1: [], 2: [], 3: [], 4: [], 5: [], 6: [], 7: [], 8: []
+        },
+        metadata: {
+            0: {
+                uniqueName: ambientUniqueNameCanary,
+                uniqueId: ambientHostIdCanary,
+                title: ambientTitleCanary,
+                type: ambientTypeCanary,
+                visible: true,
+                index: 0,
+                zone: 0
+            },
+            1: {
+                uniqueName: `${ambientUniqueNameCanary}-fixture`,
+                uniqueId: fixtureFragmentedId,
+                title: 'CMCP_E1_ONLY_AUDIO',
+                type: 'AudioChannel',
+                visible: true,
+                index: 1,
+                zone: 0
+            },
+            2: {
+                uniqueName: 'hidden-nfc-unique-name',
+                uniqueId: 'fixture-p05-nfc-id',
+                title: 'CMCP_05_日本語_é_🎹',
+                type: 'InstrumentChannel',
+                visible: true,
+                index: 2,
+                zone: 0
+            },
+            3: {
+                uniqueName: 'hidden-nfd-unique-name',
+                uniqueId: 'fixture-p05-nfd-id',
+                title: 'CMCP_05_日本語_e\u0301_🎹',
+                type: 'InstrumentChannel',
+                visible: true,
+                index: 3,
+                zone: 0
+            },
+            4: {
+                uniqueName: 'hidden-p09-unique-name',
+                uniqueId: 'fixture-p09-id',
+                title: p09Prefix,
+                type: 'AudioChannel',
+                visible: true,
+                index: 4,
+                zone: 0
+            },
+            5: {
+                uniqueName: 'hidden-duplicate-unique-name',
+                uniqueId: 'fixture-duplicate-id',
+                title: 'CMCP_DUPLICATE',
+                type: 'AudioChannel',
+                visible: true,
+                index: 5,
+                zone: 0
+            },
+            6: {
+                uniqueName: 'hidden-rename-unique-name',
+                uniqueId: 'fixture-renamed-id',
+                title: 'CMCP_10_RENAMED_変更後',
+                type: 'AudioChannel',
+                visible: true,
+                index: 6,
+                zone: 0
+            },
+            7: {
+                uniqueName: 'hidden-added-unique-name',
+                uniqueId: 'fixture-added-id',
+                title: 'CMCP_21_ADDED',
+                type: 'AudioChannel',
+                visible: true,
+                index: 7,
+                zone: 0
+            },
+            8: {
+                uniqueName: 'hidden-short-prefix-unique-name',
+                uniqueId: rejectedPrefixHostIdCanary,
+                title: rejectedPrefixSecret,
+                type: 'SecretChannelType',
+                visible: false,
+                index: 8,
+                zone: 1
+            }
+        }
+    }
+    const harness = createHarness({ directAccessVersion: '1.3', graph })
+    harness.activate()
+    harness.idle(8)
+
+    const wireItems = eventItems(
+        harness,
+        'probe.direct_access.chunk',
+        data => data.stream === 'direct_access_snapshot'
+    )
+    const observations = wireItems.filter(item => item.record_kind === 'observation')
+    assert.equal(observations.length, 9)
+    assert.ok(observations.every(item => item.unique_name === null))
+    assert.ok(observations.every(item => item.unique_name_redacted === true))
+    assert.equal(
+        harness.calls.directGetters.some(call => call[0] === 'uniqueName'),
+        false
+    )
+    assert.deepEqual(
+        harness.calls.directGetters
+            .filter(call => call[0] === 'uniqueId')
+            .map(call => call[1]),
+        [1, 2, 3, 4, 5, 6, 7]
+    )
+
+    const ambient = observations.find(item => item.object_id === 0)
+    assert.equal(ambient.title, null)
+    assert.equal(ambient.host_id_raw, null)
+    assert.equal(ambient.type_name, null)
+    assert.equal(ambient.title_redacted, true)
+    assert.equal(ambient.host_id_redacted, true)
+    assert.equal(ambient.type_name_redacted, true)
+    assert.equal(ambient.redacted_string_count, 4)
+    const rejectedPrefix = observations.find(item => item.object_id === 8)
+    assert.equal(rejectedPrefix.title, null)
+    assert.equal(rejectedPrefix.host_id_raw, null)
+    assert.equal(rejectedPrefix.title_redacted, true)
+    assert.equal(rejectedPrefix.host_id_redacted, true)
+
+    const fixture = observations.find(item => item.object_id === 1)
+    assert.equal(fixture.title, 'CMCP_E1_ONLY_AUDIO')
+    assert.equal(fixture.type_name, 'AudioChannel')
+    assert.equal(fixture.title_redacted, false)
+    assert.equal(fixture.host_id_redacted, false)
+    assert.equal(fixture.type_name_redacted, false)
+    assert.equal(fixture.redacted_string_count, 1)
+    assert.equal(resolveHostId(fixture, wireItems), fixtureFragmentedId)
+    assert.ok(fixture.host_id_fragment_count > 1)
+    assert.deepEqual(
+        observations.slice(2, 8).map(item => item.title),
+        [
+            'CMCP_05_日本語_é_🎹',
+            'CMCP_05_日本語_e\u0301_🎹',
+            p09Prefix,
+            'CMCP_DUPLICATE',
+            'CMCP_10_RENAMED_変更後',
+            'CMCP_21_ADDED'
+        ]
+    )
+
+    assertSerializedSecretsAbsent(harness, [
+        ambientTitleCanary,
+        ambientUniqueNameCanary,
+        ambientHostIdCanary,
+        ambientTypeCanary,
+        rejectedPrefixHostIdCanary,
+        'hidden-nfc-unique-name',
+        'hidden-nfd-unique-name',
+        'hidden-p09-unique-name',
+        'hidden-duplicate-unique-name',
+        'hidden-rename-unique-name',
+        'hidden-added-unique-name',
+        'hidden-short-prefix-unique-name'
+    ])
+    assertSourceSequence(harness)
+}
+
+function testExternalExceptionTextNeverCrossesProbeBoundary() {
+    const exceptionCanary = 'github_pat_external_exception_secret'
+
+    const factory = createHarness({
+        directAccessVersion: '1.3',
+        directFactoryThrows: true,
+        externalErrorCanary: exceptionCanary
+    })
+    factory.activate()
+    assert.equal(
+        events(factory, 'probe.capabilities').at(-1).data.direct_access.reason,
+        'make_direct_access_failed'
+    )
+    assertSerializedSecretsAbsent(factory, [exceptionCanary])
+
+    const activation = createHarness({
+        directAccessVersion: '1.3',
+        directActivateThrows: true,
+        externalErrorCanary: exceptionCanary
+    })
+    activation.activate()
+    assert.equal(
+        events(activation, 'probe.direct_access.error').at(-1).data.error_code,
+        'activate_failed'
+    )
+    assertSerializedSecretsAbsent(activation, [exceptionCanary])
+
+    const update = createHarness({
+        directAccessVersion: '1.3',
+        directUpdateThrows: true,
+        externalErrorCanary: exceptionCanary
+    })
+    update.activate()
+    update.idle(2)
+    assert.equal(
+        events(update, 'probe.overflow').at(-1).data.error_code,
+        'update_failed'
+    )
+    assertSerializedSecretsAbsent(update, [exceptionCanary])
+
+    const metadata = createHarness({
+        directAccessVersion: '1.3',
+        throwMetadata: true,
+        throwChildCountFor: 0,
+        externalErrorCanary: exceptionCanary,
+        graph: { base: 0, children: { 0: [] }, metadata: {} }
+    })
+    metadata.activate()
+    metadata.idle(5)
+    const metadataItem = eventItems(
+        metadata,
+        'probe.direct_access.chunk',
+        data => data.stream === 'direct_access_snapshot'
+    ).find(item => item.record_kind === 'observation')
+    assert.ok(metadataItem.metadata_errors.every(value =>
+        /^(?:getObjectTitle|isMixerChannelVisible|getMixerChannelIndex|getMixerChannelZone|getObjectTypeName)_failed$/.test(value)
+    ))
+    assert.equal(
+        metadataItem.child_enumeration_error,
+        'get_number_of_child_objects_failed'
+    )
+    assertSerializedSecretsAbsent(metadata, [exceptionCanary])
+
+    const deactivation = createHarness({
+        directAccessVersion: '1.3',
+        directDeactivateThrows: true,
+        externalErrorCanary: exceptionCanary,
+        graph: { base: 0, children: { 0: [] }, metadata: {} }
+    })
+    deactivation.activate()
+    deactivation.idle(5)
+    deactivation.deactivate()
+    const deactivateOverflow = events(deactivation, 'probe.overflow').find(event =>
+        event.data.stream === 'direct_access_deactivate'
+    )
+    assert.equal(deactivateOverflow.data.error_code, 'deactivate_failed')
+    assertSerializedSecretsAbsent(deactivation, [exceptionCanary])
+
+    const bank = createHarness({
+        externalErrorCanary: exceptionCanary,
+        bankActionThrows: { configId: 'MB_CORE_ALL', actionName: 'next' }
+    })
+    bank.activate()
+    bank.idle(5)
+    request(bank, 'exception-bank-action', 'probe.bank.next', {
+        config_id: 'MB_CORE_ALL'
+    })
+    const bankOverflow = events(bank, 'probe.overflow').find(event =>
+        event.data.stream === 'bank_action'
+    )
+    assert.equal(bankOverflow.data.error_code, 'bank_action_failed')
+    assertSerializedSecretsAbsent(bank, [exceptionCanary])
+
+    const bankUniqueId = createHarness({
+        bankUniqueIds: true,
+        bankUniqueIdThrows: true,
+        externalErrorCanary: exceptionCanary
+    })
+    bankUniqueId.activate()
+    bankUniqueId.context.bankConfigs[0].slots[0].channel.mOnTitleChange(
+        bankUniqueId.activeDevice,
+        bankUniqueId.activeMapping,
+        'CMCP_E1_ONLY_AUDIO'
+    )
+    bankUniqueId.idle(5)
+    const failedRefresh = eventItems(
+        bankUniqueId,
+        'probe.bank.chunk',
+        data =>
+            data.stream === 'mixer_bank_snapshot' &&
+            data.config_id === 'MB_CORE_ALL' &&
+            data.reason === 'page_activate'
+    ).find(item => item.record_kind === 'observation' && item.slot_index === 0)
+    assert.equal(failedRefresh.host_id_observed_with_title_callback, false)
+    assert.equal(failedRefresh.host_id_observation_status, 'getter_failed')
+    assert.equal(failedRefresh.field_last_observation_seq.host_id_raw, null)
+    assert.equal(failedRefresh.host_id_raw, null)
+    assertSerializedSecretsAbsent(bankUniqueId, [exceptionCanary])
+
+    const requestFailure = createHarness()
+    requestFailure.activate()
+    requestFailure.context.handleRequest = function () {
+        throw new Error(exceptionCanary)
+    }
+    request(requestFailure, 'unhandled-secret', 'probe.capabilities')
+    assert.equal(
+        response(requestFailure, 'unhandled-secret').error.message,
+        'Unhandled probe request failure'
+    )
+    assertSerializedSecretsAbsent(requestFailure, [exceptionCanary])
+}
+
 function testApi12DirectAccessCommonMetadataAndLifecycle() {
     const graph = {
         base: 0,
@@ -1006,9 +1771,9 @@ function testApi12DirectAccessCommonMetadataAndLifecycle() {
                 zone: 0
             },
             1: {
-                uniqueName: 'track-one',
+                uniqueName: 'must-not-be-emitted',
                 uniqueId: 'track-id-1',
-                title: 'Audio 01',
+                title: 'CMCP_E1_ONLY_AUDIO',
                 type: 'must-not-be-read',
                 visible: false,
                 index: 1,
@@ -1037,6 +1802,25 @@ function testApi12DirectAccessCommonMetadataAndLifecycle() {
     assert.equal(capability.direct_access.get_object_type_name_v1_3, false)
     assert.equal(capability.mixer_bank.unique_id, true)
 
+    const initialProjectionOrder = messages(harness)
+        .filter(message =>
+            message.type === 'event' &&
+            message.data &&
+            message.data.reason === 'page_activate' &&
+            message.data.snapshot_complete === true
+        )
+        .map(message => {
+            if (message.event === 'probe.direct_access.chunk') {
+                return 'DIRECT_ACCESS'
+            }
+            return message.data.config_id
+        })
+    assert.deepEqual(initialProjectionOrder, [
+        'MB_CORE_ALL',
+        'MB_CORE_VISIBLE',
+        'DIRECT_ACCESS'
+    ])
+
     const items = eventItems(
         harness,
         'probe.direct_access.chunk',
@@ -1050,12 +1834,22 @@ function testApi12DirectAccessCommonMetadataAndLifecycle() {
             item.title,
             item.type_name,
             item.mixer_visible,
-            item.mixer_index
+            item.mixer_index,
+            item.unique_name_redacted,
+            item.title_redacted,
+            item.host_id_redacted,
+            item.redacted_string_count
         ]),
         [
-            ['root', 'root-id', 'MixConsole', null, true, 0],
-            ['track-one', 'track-id-1', 'Audio 01', null, false, 1]
+            [null, null, null, null, true, 0, true, true, true, 3],
+            [null, 'track-id-1', 'CMCP_E1_ONLY_AUDIO', null, false, 1,
+                true, false, false, 1]
         ]
+    )
+    assert.equal(harness.calls.directGetters.some(call => call[0] === 'uniqueName'), false)
+    assert.equal(
+        harness.calls.directGetters.some(call => call[0] === 'uniqueId' && call[1] === 0),
+        false
     )
     assert.equal(harness.calls.directGetters.some(call => call[0] === 'type'), false)
 
@@ -1084,6 +1878,48 @@ function testApi12DirectAccessCommonMetadataAndLifecycle() {
     assertSourceSequence(harness)
 }
 
+function testDirectAccessUniqueNamePolicyTracksGetterAvailability() {
+    const harness = createHarness({
+        directAccessVersion: '1.2',
+        omitDirectUniqueName: true,
+        graph: {
+            base: 0,
+            children: { 0: [] },
+            metadata: {
+                0: {
+                    uniqueName: 'must-never-be-read',
+                    uniqueId: 'fixture-e1-id',
+                    title: 'CMCP_E1_ONLY_AUDIO',
+                    type: 'unused',
+                    visible: true,
+                    index: 0,
+                    zone: 0
+                }
+            }
+        }
+    })
+    harness.activate()
+    harness.idle(5)
+
+    const capability = events(harness, 'probe.capabilities').at(-1).data
+    assert.equal(capability.direct_access.get_object_unique_name_v1_2, false)
+    const item = eventItems(
+        harness,
+        'probe.direct_access.chunk',
+        data => data.stream === 'direct_access_snapshot'
+    ).find(value => value.record_kind === 'observation')
+    assert.equal(item.unique_name, null)
+    assert.equal(item.unique_name_redacted, false)
+    assert.equal(item.unique_name_status, 'not_available')
+    assert.equal(item.redacted_string_count, 0)
+    assert.equal(
+        harness.calls.directGetters.some(call => call[0] === 'uniqueName'),
+        false
+    )
+    assertSerializedSecretsAbsent(harness, ['must-never-be-read'])
+    assertSourceSequence(harness)
+}
+
 function testDirectAccessEnumerationFailuresAreIncomplete() {
     const countFailure = createHarness({
         directAccessVersion: '1.2',
@@ -1091,7 +1927,7 @@ function testDirectAccessEnumerationFailuresAreIncomplete() {
         graph: { base: 0, children: { 0: [1], 1: [] }, metadata: {} }
     })
     countFailure.activate()
-    countFailure.idle()
+    countFailure.idle(2)
     const countChunks = events(countFailure, 'probe.direct_access.chunk').filter(event =>
         event.data.stream === 'direct_access_snapshot'
     )
@@ -1105,7 +1941,7 @@ function testDirectAccessEnumerationFailuresAreIncomplete() {
         graph: { base: 0, children: { 0: [1], 1: [] }, metadata: {} }
     })
     invalidChild.activate()
-    invalidChild.idle()
+    invalidChild.idle(2)
     const childChunks = events(invalidChild, 'probe.direct_access.chunk').filter(event =>
         event.data.stream === 'direct_access_snapshot'
     )
@@ -1121,7 +1957,7 @@ function testDirectAccessEnumerationFailuresAreIncomplete() {
         graph: { base: 0, children: { 0: [1], 1: [] }, metadata: {} }
     })
     invalidCount.activate()
-    invalidCount.idle()
+    invalidCount.idle(2)
     const invalidCountChunks = events(invalidCount, 'probe.direct_access.chunk').filter(
         event => event.data.stream === 'direct_access_snapshot'
     )
@@ -1148,7 +1984,7 @@ function testOpaqueHostIdsAreLosslessAndFragmented() {
                 0: {
                     uniqueName: 'root',
                     uniqueId: directRootId,
-                    title: 'Root',
+                    title: 'CMCP_E1_ONLY_AUDIO',
                     type: 'unused',
                     visible: true,
                     index: 0,
@@ -1157,7 +1993,7 @@ function testOpaqueHostIdsAreLosslessAndFragmented() {
                 1: {
                     uniqueName: 'track',
                     uniqueId: directTrackId,
-                    title: 'Track',
+                    title: 'CMCP_E8_01',
                     type: 'unused',
                     visible: true,
                     index: 1,
@@ -1167,6 +2003,11 @@ function testOpaqueHostIdsAreLosslessAndFragmented() {
         }
     })
     harness.activate()
+    harness.context.bankConfigs[0].slots[0].channel.mOnTitleChange(
+        harness.activeDevice,
+        harness.activeMapping,
+        'CMCP_E1_ONLY_AUDIO'
+    )
     harness.idle(5)
 
     const directWireItems = eventItems(
@@ -1224,7 +2065,7 @@ function testControlCharacterHostIdsUseFrameSafeFragments() {
                 0: {
                     uniqueName: 'root',
                     uniqueId: directRootId,
-                    title: 'Root',
+                    title: 'CMCP_E1_ONLY_AUDIO',
                     type: 'unused',
                     visible: true,
                     index: 0,
@@ -1233,7 +2074,7 @@ function testControlCharacterHostIdsUseFrameSafeFragments() {
                 1: {
                     uniqueName: 'track',
                     uniqueId: directTrackId,
-                    title: 'Track',
+                    title: 'CMCP_E8_01',
                     type: 'unused',
                     visible: true,
                     index: 1,
@@ -1273,7 +2114,7 @@ function testOversizedHostIdsFailClosed() {
                 0: {
                     uniqueName: 'root',
                     uniqueId: oversizedId,
-                    title: 'Root',
+                    title: 'CMCP_E1_ONLY_AUDIO',
                     type: 'unused',
                     visible: true,
                     index: 0,
@@ -1295,7 +2136,7 @@ function testOversizedHostIdsFailClosed() {
     assertSourceSequence(harness)
 }
 
-function testDirectAccessUpdateCallbackDoesNotStarveSnapshot() {
+function testDirectAccessUpdateCallbackIsCoalescedIntoCurrentSnapshot() {
     const harness = createHarness({
         directAccessVersion: '1.2',
         directUpdateObjectChange: 0,
@@ -1307,9 +2148,40 @@ function testDirectAccessUpdateCallbackDoesNotStarveSnapshot() {
     const snapshots = events(harness, 'probe.direct_access.chunk').filter(event =>
         event.data.stream === 'direct_access_snapshot'
     )
-    assert.ok(snapshots.some(event => event.data.reason === 'page_activate'))
-    assert.ok(snapshots.some(event => event.data.reason === 'object_change'))
+    assert.deepEqual(
+        snapshots.map(event => event.data.reason),
+        ['page_activate']
+    )
+    assert.equal(harness.calls.directUpdate.length, 1)
+    assert.equal(
+        eventItems(
+            harness,
+            'probe.direct_access.chunk',
+            data => data.stream === 'direct_access_feedback'
+        ).filter(item => item.change === 'object_change').length,
+        1
+    )
+
+    request(harness, 'coalesced-da-snapshot', 'probe.direct_access.snapshot')
+    assert.deepEqual(response(harness, 'coalesced-da-snapshot').result, {})
+    harness.idle(2)
+
+    const finalSnapshots = events(harness, 'probe.direct_access.chunk').filter(event =>
+        event.data.stream === 'direct_access_snapshot'
+    )
+    assert.deepEqual(
+        finalSnapshots.map(event => event.data.reason),
+        ['page_activate', 'command_snapshot']
+    )
     assert.equal(harness.calls.directUpdate.length, 2)
+    assert.equal(
+        eventItems(
+            harness,
+            'probe.direct_access.chunk',
+            data => data.stream === 'direct_access_feedback'
+        ).filter(item => item.change === 'object_change').length,
+        2
+    )
     assert.equal(events(harness, 'probe.overflow').length, 0)
     assertSourceSequence(harness)
 }
@@ -1388,16 +2260,13 @@ function testApi13TypeCycleAndTraversalBounds() {
         }
     })
     cyclicHarness.activate()
-    cyclicHarness.idle()
+    cyclicHarness.idle(2)
 
     const capability = events(cyclicHarness, 'probe.capabilities').at(-1).data
     assert.equal(capability.direct_access.get_object_type_name_v1_3, true)
     assert.equal(capability.mixer_bank.explicit_main_filter, true)
-    assert.ok(cyclicHarness.zones.slice(0, 3).every(zone =>
+    assert.ok(cyclicHarness.zones.every(zone =>
         zone.filterCalls.some(call => call[0] === 'includeWindowZoneMainChannels')
-    ))
-    assert.ok(cyclicHarness.zones.slice(3).every(zone =>
-        zone.filterCalls.some(call => call[0] === 'excludeWindowZoneMainChannels')
     ))
 
     const cycleEvents = events(cyclicHarness, 'probe.direct_access.chunk').filter(event =>
@@ -1425,7 +2294,7 @@ function testApi13TypeCycleAndTraversalBounds() {
         graph: { base: 0, children: childMap, metadata: {} }
     })
     boundedHarness.activate()
-    boundedHarness.idle()
+    boundedHarness.idle(2)
 
     const boundedEvents = events(boundedHarness, 'probe.direct_access.chunk').filter(event =>
         event.data.stream === 'direct_access_snapshot' &&
@@ -1444,12 +2313,12 @@ function testApi13TypeCycleAndTraversalBounds() {
         graph: { base: 0, children: { 0: [1], 1: [] }, metadata: {} }
     })
     largeErrorHarness.activate()
-    largeErrorHarness.idle()
+    largeErrorHarness.idle(2)
     const errorChunks = events(largeErrorHarness, 'probe.direct_access.chunk').filter(event =>
         event.data.stream === 'direct_access_snapshot' &&
         event.data.reason === 'page_activate'
     )
-    assert.equal(errorChunks.length, 2)
+    assert.ok(errorChunks.length >= 1)
     assert.equal(errorChunks[0].data.total_items, 2)
     assert.equal(errorChunks.flatMap(event => event.data.items).length, 2)
     assert.equal(events(largeErrorHarness, 'probe.overflow').length, 0)
@@ -1464,12 +2333,19 @@ testBankGenerationDoesNotReusePriorSlotState()
 testSnapshotQueuesAreBoundedAndDeactivationIsFailClosed()
 testBankActionFailureIsFatal()
 testFeedbackStreamsPreserveCallbackArrivalOrder()
+testObservationEpochCutValidationAndExhaustion()
+testObservationEpochPreservesQueuedCallbackCut()
+testFixtureTitleAllowlistIsExactAndBounded()
+testMixerBankSourceRedactionAndFixtureIdFragments()
+testDirectAccessSourceRedactionAndFixtureIdFragments()
+testExternalExceptionTextNeverCrossesProbeBoundary()
 testApi12DirectAccessCommonMetadataAndLifecycle()
+testDirectAccessUniqueNamePolicyTracksGetterAvailability()
 testDirectAccessEnumerationFailuresAreIncomplete()
 testOpaqueHostIdsAreLosslessAndFragmented()
 testControlCharacterHostIdsUseFrameSafeFragments()
 testOversizedHostIdsFailClosed()
-testDirectAccessUpdateCallbackDoesNotStarveSnapshot()
+testDirectAccessUpdateCallbackIsCoalescedIntoCurrentSnapshot()
 testDirectAccessUpdateFailurePreventsReady()
 testDirectAccessDeactivateFailureIsFatal()
 testApi13TypeCycleAndTraversalBounds()

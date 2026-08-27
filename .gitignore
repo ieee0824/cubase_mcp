@@ -30,8 +30,10 @@ service-account*.json
 # Local-only artifacts reserved by the Track API runtime runbook.
 # Primary runtime output must still be outside the repository.
 /.runtime-artifacts/track-api-host-spike/
-**/CMCP_TrackFixture_r1_*/
+**/CMCP_TrackFixture_r*_*/
 **/CMCP_TrackFixture_*.cpr
 **/CMCP_TrackFixture_*.bak
+**/CMCP_TrackProbe_*.manifest.json
+**/CMCP_TrackProbe_*.audit.json
 **/CMCP_TrackProbe_*.jsonl
 **/CMCP_TrackProbe_*.syx

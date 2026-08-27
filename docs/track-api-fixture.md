@@ -4,7 +4,9 @@
 
 主な利用先は[Issue #3](https://github.com/ieee0824/cubase_mcp/issues/3)のhost API調査と[Issue #22](https://github.com/ieee0824/cubase_mcp/issues/22)の受け入れテストです。列挙方式は[Issue #4](https://github.com/ieee0824/cubase_mcp/issues/4)、DTO / ID / pagination契約は[Issue #5](https://github.com/ieee0824/cubase_mcp/issues/5)で決定し、全体の依存関係は[Issue #24](https://github.com/ieee0824/cubase_mcp/issues/24)で管理します。
 
-fixture revision: `1`
+fixture revision: `2`
+
+revision 2では、bank幅`8`と対象channel数がちょうど一致する境界fixture `E8`を追加しました。revision 1のlocal projectやrun recordをrevision 2の証拠として再利用しません。
 
 ## この文書で固定するもの
 
@@ -41,12 +43,12 @@ fixture revision: `1`
 専用directory名の例:
 
 ```text
-CMCP_TrackFixture_r1_<YYYYMMDD>
+CMCP_TrackFixture_r2_<YYYYMMDD>
 ```
 
 このdirectoryと`.cpr`はlocal artifactです。Gitへ追加しないでください。Gitへcommitする結果や共有ログにはこの文書の合成Track名だけを含め、absolute path、raw MIDI device名、audio data、credentialは記録しません。原状回復にraw device名が必要なO1のpre-run inventoryだけはlocal artifactとして保持し、共有しません。
 
-repositoryの`.gitignore`は`CMCP_TrackFixture_*`のproject / backup、`CMCP_TrackProbe_*`のJSONL / SysEx、予約済みruntime directoryを追加防御として除外しますが、Cubase projectやaudio artifactを包括的には除外しません。`.cpr`、`.bak`、`Audio/`、`Edits/`、`Images/`、autosave、raw SysEx / JSON logをstage前に手動で確認してください。raw artifactをrepository外へ置く原則は変わりません。
+repositoryの`.gitignore`は`CMCP_TrackFixture_*`のproject / backup、`CMCP_TrackProbe_*`のmanifest / audit report / JSONL / SysEx、予約済みruntime directoryを追加防御として除外しますが、Cubase projectやaudio artifactを包括的には除外しません。`.cpr`、`.bak`、`Audio/`、`Edits/`、`Images/`、autosave、manifest、raw SysEx / JSON logをstage前に手動で確認してください。runtime artifactをrepository外へ置く原則は変わりません。
 
 ## 検証matrix
 
@@ -54,17 +56,18 @@ repositoryの`.gitignore`は`CMCP_TrackFixture_*`のproject / backup、`CMCP_Tra
 
 | 項目 | 記録例 | 必須 |
 | --- | --- | --- |
-| run ID | `mac-c13-r1-001` | yes |
-| fixture revision | `1` | yes |
+| run ID | `mac-c13-r2-001` | yes |
+| fixture revision | `2` | yes |
 | 実施日時とtimezone | `2026-08-26T22:00:00+09:00` | yes |
 | OS / build / architecture | `macOS 26.5.1 / build ... / arm64` | yes |
 | Cubase edition / version / build | `Cubase Pro 13.0.30.226` | yes |
 | MIDI Remote API | `1.1` | yes |
 | repository commit | 40桁のGit commit SHA | yes |
-| probe source / deployed SHA-256 | 2つのdigest | yes |
+| probe source / installer embedded / deployed SHA-256 | 一致する3つのdigest | yes |
+| collector binary SHA-256 | 実行したrelease binaryのdigest | yes |
 | daemon version / build | `cubase_mcp 0.1.0 / commit ...` | 使用時 |
 | Bridge設定 | mode、標準port roleまたはredacted alias、address、timeout | 使用時 |
-| Track access方式 | `MixerBankZone` / `DirectAccess` | yes |
+| profile / Track access方式 | `c13_mixer_bank` / `MixerBankZone`、または`c15_combined` / 両projection | yes |
 | probe bank幅 | `8` | Mixer Bank runのみ |
 | Mixer type / window-zone filter、followVisibility | include/exclude設定、true / false | Mixer Bank runのみ |
 | explicit main-zone filter capability | `available` / `not available` | Mixer Bank runのみ |
@@ -74,11 +77,13 @@ repositoryの`.gitignore`は`CMCP_TrackFixture_*`のproject / backup、`CMCP_Tra
 | callback観測window | `5000 ms` | yes |
 | reload / reconnect deadline | `30000 ms` | R1 / R2 |
 | Instrument / Effectの代替plug-in | 名前または`none` | 該当時 |
-| optional caseの省略理由 | edition非対応等 | 該当時 |
+| O1 status / 理由 | `skipped / not_separately_authorized` | yes |
 
 最低限Cubase 13.0.30で実施し、利用できる場合は13.0.50以降の正確なbuildでも同じ手順を実施します。13.0.50はMIDI Remote API 1.2導入境界ですが、現在の調査環境にはinstallされていません。Cubase 15等のrunは補足情報であり、Issue #4が決定するまでは13.0.50以降のrunを代替した扱いにしません。未installまたは未確認のversionを「検証済み」と記載せず、`not available`として残してください。
 
 Cubase versionごとにfixtureを新規作成します。新しいCubaseで保存した`.cpr`をCubase 13で開いて使い回してはいけません。
+
+Cubase 15ではMixer Bank用とDirectAccess用にfixtureやrunを複製しません。1つのCubase instance、collector process、run ID、manifestで各caseを1回だけ操作し、同じcheckpointからMixer BankとDirectAccessの2 projectionを取得します。Cubase 13でもruntime feature detectionがDirectAccessを`supported: true, active: true`と報告した場合は同じ条件付きcombined契約を適用し、初期DirectAccess snapshotと全checkpointのDirectAccess final snapshotを省略しません。`supported: false, active: false`かつ固定のunavailable / incomplete reasonの場合だけMixer Bank単独とし、DirectAccess eventがないことを確認します。supportedだがinactive、activation error、または組合せ不整合はunsupportedへ丸めずrun invalidとします。API versionだけからどちらかを決め打ちしません。
 
 ## 作成するlocal project
 
@@ -86,6 +91,7 @@ Cubase versionごとにfixtureを新規作成します。新しいCubaseで保�
 | --- | --- | --- |
 | E0 | `CMCP_TrackFixture_Empty.cpr` | project Trackが0本の状態 |
 | E1 | `CMCP_TrackFixture_One.cpr` | 通常Audio Trackが1本だけの状態 |
+| E8 | `CMCP_TrackFixture_Eight.cpr` | Mixer Bank対象がbank幅と同じ8本の境界状態 |
 | C1 | `CMCP_TrackFixture_Core_Baseline.cpr` | 変更前の基準状態 |
 | M1 | `CMCP_TrackFixture_Mutation.cpr` | rename / add / delete用copy |
 | O1 | `CMCP_TrackFixture_Optional_IO_VCA.cpr` | Input / Output / VCAの任意調査 |
@@ -141,6 +147,45 @@ UI上の基準値:
 | visibility | Projectと同期対象MixConsoleでvisible |
 | host access | inclusion、ID、type、順序は観測し、推測しない |
 
+## Case E8: bank幅ちょうど8 Track project
+
+E8は「対象がbank幅ちょうど」の境界を、C1の終端挙動から推測せず独立して観測するためのprojectです。
+
+1. E0を開き、すぐに`CMCP_TrackFixture_Eight.cpr`として別名保存する。
+2. 次のStereo Audio Trackを1本ずつ追加し、Project windowで表の順へ並べる。これ以外のProject Track、Folder、Group、FX、Instrument、MIDI、VCAは追加しない。
+3. 全8本のroutingを`No Bus` / `Not Connected`にし、Record Enable、Monitor、Automation Write、Mute、Soloをoffにする。
+4. `CMCP_E8_01`だけを選択し、残り7本が非選択であることを確認する。
+5. 全8本をProject windowと同期対象MixConsoleでvisibleにし、left / right zoneへlockせず中央のscrolling fader sectionへ置く。
+6. 保存して閉じ、再度開いて状態が復元されることを確認する。
+
+UI ground truth:
+
+| label | Track type | Track name | Project順 | selected | mute | solo | Project / sync対象MixConsole visibility |
+| --- | --- | --- | ---: | --- | --- | --- | --- |
+| E8-01 | Audio | `CMCP_E8_01` | 1 | true | false | false | visible |
+| E8-02 | Audio | `CMCP_E8_02` | 2 | false | false | false | visible |
+| E8-03 | Audio | `CMCP_E8_03` | 3 | false | false | false | visible |
+| E8-04 | Audio | `CMCP_E8_04` | 4 | false | false | false | visible |
+| E8-05 | Audio | `CMCP_E8_05` | 5 | false | false | false | visible |
+| E8-06 | Audio | `CMCP_E8_06` | 6 | false | false | false | visible |
+| E8-07 | Audio | `CMCP_E8_07` | 7 | false | false | false | visible |
+| E8-08 | Audio | `CMCP_E8_08` | 8 | false | false | false | visible |
+
+`MB_CORE_ALL`と`MB_CORE_VISIBLE`はいずれもAudioをincludeし、Input / Outputをexcludeし、main sectionだけを対象にするため、このfixtureでeligibleなProject由来channelはexactly `8`です。Audio Connections由来のchannelがUIに存在してもこの8本へ加算しません。実際のhost結果が8件になること自体はfixture作成条件ではなく観測対象であり、欠落、重複、scope外channelを補正しません。
+
+runtimeではE1 checkpoint終了後に必須`E8` checkpointを開始し、`probe.observation.cut`の成功responseとcollectorが直後に自動生成するaction markerを隣接recordとして確認し、そのmarker直後にこのprojectを開きます。project load / optional same-source reactivation、UI ground truth確認、5000 ms window、`MB_CORE_ALL` / `MB_CORE_VISIBLE`（条件付きDirectAccessを含む）のfinal snapshot set、quiet periodをすべて`E8`内へ収めます。`E8`終了後にだけ次のB0 Reset checkpointへ進み、project openとResetを同じactionへ混ぜません。
+
+各configで次の境界sequenceを実施します。各行を独立checkpointとし、後述の`5000 ms` windowと明示的final snapshotを適用します。
+
+| checkpoint | 操作 | 境界で確認すること |
+| --- | --- | --- |
+| `E8-<CONFIG>-B0-reset` | Reset | 最初のbankにexactly 8本がどの順で現れるか |
+| `E8-<CONFIG>-B1-next` | Next 1回 | ちょうど終端から進めた場合のcallback、空slot、repeat、no-op |
+| `E8-<CONFIG>-B2-prev` | Prev 1回 | 最初のbankへ可逆に戻るか |
+| `E8-<CONFIG>-B3-reset` | Reset | 操作後も初期bankを同じ規則で再取得できるか |
+
+`<CONFIG>`は`MB_CORE_ALL`または`MB_CORE_VISIBLE`へ置換するため、E8の完全なcheckpoint IDは`E8-MB_CORE_ALL-B0-reset`から`E8-MB_CORE_VISIBLE-B3-reset`までの8個です。Next後に同じ8本が見える、空に見える、またはcallbackがないことだけで終端を断定しません。C1のbank幅超過・final partial pageの観測と組み合わせ、有限で重複・欠落のない列挙条件を別途評価します。
+
 ## Case C1: core baseline
 
 ### 正確なTrack inventory
@@ -149,10 +194,10 @@ UI上の基準値:
 2. Trackを追加する前に`CMCP_TrackFixture_Core_Baseline.cpr`として別名保存する。
 3. 次の20本だけを作成し、Project windowで上から`P01`から`P20`の順へ並べる。全Trackをproject直下へ置き、`P01` Folderは空のままにする。
 
-`P09`の`<LONG_NAME>`は次の117 ASCII文字です。省略せずpasteしてください。
+`P09`の`<LONG_NAME>`は次の80 ASCII文字です。省略せずpasteしてください。
 
 ```text
-CMCP_09_LONG_ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZ
+CMCP_09_LONG_ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNO
 ```
 
 `P05`の`é`は単一code point `U+00E9`（NFC）です。要求名は15 Unicode scalar values / 25 UTF-8 bytesです。
@@ -182,7 +227,7 @@ CMCP_09_LONG_ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNO
 
 P13〜P20はselected / mute / soloの8通りを1回ずつ表します。すべてのRecord Enable、Monitor、Automation Writeはoffです。P02とP03は同名ですが、上側のP02だけをMute、下側のP03だけをSoloにします。状態確認で名前だけを使わず、Project順と明示control値を併記してください。
 
-Track作成後、Cubase UIが実際に受理したP05/P09の文字列、Unicode scalar数、UTF-8 byte数をrun記録へ転記します。truncationやUnicode normalizationが起きた場合は`SETUP_VARIANCE`として要求値と実値を両方残し、そのrunのUI ground truthには実値を使います。文字列を黙って補正したり、host結果を要求値へ置換したりしません。
+Track作成後、Cubase UIが実際に受理したP05/P09の文字列、Unicode scalar数、UTF-8 byte数をrun記録へ転記します。P05は固定NFCまたはその固定NFD表現だけを受理し、NFDだった場合を`SETUP_VARIANCE`とします。P05がtruncationまたはそれ以外の変換を受けた場合はfixture不成立として停止します。P09は固定80文字のprefixのうち、予約marker `CMCP_09_LONG_`の13文字を完全に含むものだけを受理し、truncationが起きた場合を`SETUP_VARIANCE`として要求値と実値を両方残します。`C`や`CMCP`のような短いprefixはambient titleと区別できないため許可しません。いずれもrunのUI ground truthには実値を使い、文字列を黙って補正したり、host結果を要求値へ置換したりしません。
 
 ### baseline状態の設定
 
@@ -195,7 +240,7 @@ Track作成後、Cubase UIが実際に受理したP05/P09の文字列、Unicode 
 7. 観測surfaceを記録する。lower-zone MixConsoleはProject visibilityへ自動追従するため同期設定を`automatic`と記録する。separate MixConsoleでは`Sync Visibility of Project and MixConsole`をonにし、同期設定を`on`と記録する。
 8. MixConsoleのZones表示でP02〜P20をleft / rightへlockせず、中央のscrolling fader sectionへ置く。P01 FolderはMixer Bank channelではないため対象外とする。
 9. Track VisibilityからP08だけをhideする。
-10. P08がVisibility listには残り、Project windowと対象MixConsoleでは非表示であることを確認する。separate MixConsoleで同期toggleを利用できない場合はvisibility-sync subcaseだけを`UNSUPPORTED`と記録し、main runはProject-onlyの観測として続行する。lower-zoneにはtoggleがないため、`UNSUPPORTED`ではなく`automatic`とする。
+10. P08がVisibility listには残り、Project windowと対象MixConsoleでは非表示であることを確認する。primary runではseparate MixConsoleと利用可能な同期toggleが必須であり、toggleを利用できない場合はここでprimary auditを停止する。Project-onlyまたはlower-zoneだけの結果は別のsupplemental runとして扱い、44-checkpoint primary evidenceへ流用しない。lower-zoneの同期状態はtoggleを持たないため`UNSUPPORTED`ではなく`automatic`と記録する。
 11. `CMCP_TrackFixture_Core_Baseline.cpr`を保存して閉じ、再度開いて状態が復元されることを確認する。
 
 Soloによって他channelが聴感上muteされても、実機ログでは表の明示的なMute / Solo control値とeffective audio stateを混同しません。
@@ -223,7 +268,7 @@ FolderにはMixer Bankのinclude対象がないため、P01はこの候補count�
 
 Cubase 13.0.30のMIDI Remote API 1.1にはexplicit main-zone filterがありません。両primary configは`excludeWindowZoneLeftChannels()`と`excludeWindowZoneRightChannels()`でleft / rightを明示的に除外し、lockされていない中央のscrolling fader sectionをimplicit対象にします。`includeWindowZoneMainChannels()`相当のmethodはfeature detectionで存在を確認できたhostだけで追加し、API 1.1では呼び出しません。capabilityと実際の呼出値をrun情報へ記録します。追加のfilter実験は別config IDで記録し、primary comparisonへ混ぜません。
 
-同じC1から次の固定sequenceを1回ずつ実施します。
+同じC1から次の固定sequenceを1回ずつ実施します。raw checkpoint IDは`C1-<CONFIG>-<SNAPSHOT>`とし、例えば`MB_CORE_ALL`の`B0-reset`は`C1-MB_CORE_ALL-B0-reset`です。2 config × 6操作の12 IDを省略しません。
 
 1. configと実際に呼び出したfilter値が上表に一致することを記録する。
 2. Resetを実行し、8 slotを`B0-reset`として記録する。
@@ -255,6 +300,7 @@ fixtureの正解は次のUI ground truthです。host APIの結果がどの候�
 
 | candidate | 順序とscope | hidden P08 | 用途 |
 | --- | --- | --- | --- |
+| E8 exact-width core channels | E8-01〜E8-08のProject上からの順 | n/a | bank幅ちょうどの境界fixture |
 | Project inventory | P01〜P20のProject上からの順 | 含む | fixture自体の正解 |
 | all core channels | P02〜P20のProject上からの順 | 含む | visibility非追従Mixer候補 |
 | visible core channels | P02〜P07、P09〜P20の順 | 除外 | visibility追従Mixer候補 |
@@ -271,19 +317,32 @@ fixtureの正解は次のUI ground truthです。host APIの結果がどの候�
 
 ## Callback観測window
 
-bank操作とmutation操作は、操作直前から連続してcallbackを記録し、UIで期待状態を確認した後も操作開始から`5000 ms`まで観測を続けます。1秒のquiet periodへ早く到達してもwindowを短縮しません。window終了時にUI / host snapshotを採取し、次の条件をすべて満たした場合だけ次の操作へ進みます。
+初期化、bank操作、mutation、project切替、reload、restartを含むすべての観測checkpointは、操作直前から連続してcallbackを記録し、UIで期待状態を確認した後も操作開始から`5000 ms`以上観測を続けます。監査可能な観測anchorは、observation cutを使う21 checkpointと`INIT` / `R1` / `R2`ではaction marker時刻、bank navigationではReset / Next / Prev成功responseの受信時刻です。cut checkpointでは成功したcut responseと`boundary_source = probe.observation.cut_response`の自動action markerをcollectorが1つのatomic output pairとして隣接させ、同じrequest ID / epochをmarkerへ保持します。checkpoint開始時刻、cut response、navigation commandより前のaction markerを5000 ms windowの代用にしません。各操作の直前にはraw `collector_action` markerをexactly 1件記録し、1秒のquiet periodへ早く到達してもwindowを短縮しません。
 
-- window最後の1000 msに、probe streamのcallbackがない。
+`INIT`ではaction markerを書いてから対象Cubaseを起動し、その後に同じsourceの`probe.loaded`を受信します。cold launch時間はR1 / R2用の`reconnect_deadline_ms`へ含めず、任意の上限で正しいrunを捨てません。新しいactivationは`probe.loaded` → `probe.mapping_active` → `probe.capabilities` → `reason = page_activate`の`MB_CORE_ALL` / `MB_CORE_VISIBLE`初期snapshot完了 → runtime capabilityがDirectAccessをsupported / activeとした場合だけその初期snapshot完了 → `probe.ready(true, initial_snapshots_complete = true)`の順を必須とします。R1 / R2でもaction markerより前のlifecycleや初期snapshotを新activationの証拠へ流用せず、同じ順序と完全性を再検証します。E0 / E1 / E8 / C1やS9等の通常checkpointで同sourceのpage reactivationが発生した場合は、action後の`ready(false)` → mapping → capability → 初期snapshot → readyを同checkpoint内でexactly 1回完了し、target選択が破棄された後の再discoverを行ってからfinal snapshotへ進みます。通常checkpointで新しい`probe.loaded`、partial / 複数activation、action前sequenceの流用、再discover省略を許しません。
+
+各checkpointでは次の順序を固定します。
+
+1. checkpointを開始する。
+2. `E0` / `E1` / `E8` / `C1`とS0〜S9のexactly 21 checkpointでは、最初のtargeted commandとして`probe.observation.cut`を`@selected`へ送る。成功responseをcollectorがraw `probe_response`として出力した直後、同じatomic pair内に同じrequest ID / `observation_epoch`を持つraw `collector_action` markerを自動生成するため、operatorは別の`collector.action`を送らない。隣接するmarkerを確認した直後にUI操作を行う。bank navigationではcutを送らず、先に明示的markerを書いてから`1000 ms`以内に対応するReset / Next / Prevを送る。`INIT` / `R1` / `R2`もcutを送らず、明示的marker直後に新activationを開始する。UI annotationの`action_confirmed`は、この順序で表の操作だけを行った場合にだけ`true`にする。
+3. 上記の観測anchorから`5000 ms`以上を経過させる。cut checkpointではaction markerより前のcut待ち時間を、navigationでは操作responseより前の待ち時間をwindowへ算入せず、途中でquietになっても短縮しない。
+4. checkpointを閉じる前に明示的なfinal snapshot commandを送る。C15、またはC13でruntime capabilityがDirectAccessをsupported / activeと報告したrunでは、最初に`probe.direct_access.snapshot`を取得し、response、同期`update()`から生じ得るfeedback、全chunkの完了まで待つ。その後、E8 / C1のbank navigation checkpointは操作したconfigの`probe.bank.snapshot`を1回取得し、それ以外は`MB_CORE_ALL`、続けて`MB_CORE_VISIBLE`を取得する。DirectAccessが固定のunsupported分岐であるrunでは同じbank snapshotだけを同じ順で取得する。自動初期snapshot、操作直後のcallback、または直前checkpointのsnapshotをfinal snapshotの代用にしない。
+5. final snapshot setの最初のsnapshotが完了した後は、後続する同じsetの明示的snapshot request / response / chunk以外のprobe messageやhost callbackを1件も許さない。DirectAccess `update()`の同期feedbackは最初のDirectAccess snapshot完了前にだけ許され、完了後へ持ち越さない。set最後のresponse / chunkを受信してからは、probe messageもhost callbackもない追加のquiet periodを連続`1000 ms`以上待つ。final snapshotがcollectorのlast-message clockを更新するため、snapshot完了直後にcheckpointを終了しない。set途中または最後のsnapshot後に予期しないmessageが1件でも届いた場合はsnapshotが同じUI状態を表さない、または古くなり得るため、quiet timerだけを再開して成功扱いにせず、そのrunを停止する。
+6. 文書で固定した期待状態とUI実測状態が一致したかを同じcheckpoint IDのannotationへ`result` / `ui_ground_truth_confirmed`として記録し、その後にだけcheckpointを終了する。個々の状態値は自由記述でsidecarへ複製せず、このrevisionの固定fixture表を期待値、boolean確認を実測照合結果とする。P05/P09の受理実値と代替plug-inだけは`fixture_acceptance`へ構造化して記録する。
+
+Cubase 15、およびruntime capabilityがDirectAccessをsupported / activeと報告したCubase 13 runでは、同じUI操作と同じwindowに対してMixer BankとDirectAccessのfinal snapshotを両方取得します。一方だけのsnapshotから他方のprojectionを推測しません。次の条件をすべて満たした場合だけ次の操作へ進みます。
+
+- final snapshot完了後からcheckpoint終了まで、probe messageもhost callbackも1件もなく、1000 ms以上のquietを満たした。
 - UIの期待状態を確認でき、利用中access方式がsnapshotまたはready状態を提供する場合はそれも取得できた。
 - 前stepのwindow終了後に遅延callbackを検出していない。
 
-期限までcallbackが続く、必要な状態を取得できない、またはwindow終了後から次のUI操作前までにcallbackを検出した場合は`INCONCLUSIVE_CALLBACK_TIMEOUT`とします。遅延callbackは`orphan_after_<step>`として記録し、次のUI操作を行わず、そのsequenceを停止します。callbackが来ないことやboolean値を推測で補いません。異なるwindowを使うrunは、値と理由を記録し、primary comparisonから分離します。
+期限までcallbackが続く、明示的final snapshotを取得できない、final snapshot後に新しいmessageが届く、必要な状態を取得できない、またはwindow終了後から次のUI操作前までにcallbackを検出した場合は`INCONCLUSIVE_CALLBACK_TIMEOUT`とします。遅延callbackは`orphan_after_<step>`として記録し、次のUI操作を行わず、そのsequenceを停止します。callbackが来ないことやboolean値を推測で補いません。異なるwindowを使うrunは、値と理由を記録し、primary comparisonから分離します。
 
 ## Case M1: mutation sequence
 
 1. C1 baselineを開く。
-2. すぐに`CMCP_TrackFixture_Mutation.cpr`として別名保存する。
-3. probeを開始し、安定した初期snapshotを`S0`として記録する。
+2. `S0` checkpointを開始し、action marker直後に`CMCP_TrackFixture_Mutation.cpr`として別名保存する。Save Asに伴うcallbackをcheckpoint外へ出さない。
+3. 保存後の安定した初期snapshotを同じ`S0`として記録する。
 4. P10だけを選択し、準備操作のselection差分を`S1-select`として記録する。
 5. P10を`CMCP_10_RENAMED_変更後`へrenameし、`S1-rename`を記録する。
 6. P12だけを選択し、`S2-select-anchor`を記録する。
@@ -295,12 +354,12 @@ bank操作とmutation操作は、操作直前から連続してcallbackを記録
 12. P13だけを選択し、P12からP13へのselection変更を`S5-select-change`として記録する。
 13. P04を意図的に選択せず、P04のMute controlをonにして`S6-mute`を記録する。UIがselectionも変更した場合は、その差分を同じcheckpointへ記録する。
 14. P03を意図的に選択せず、P03のSolo controlをoffにして`S7-solo`を記録する。UIがselectionも変更した場合は、その差分を同じcheckpointへ記録する。
-15. separate MixConsoleの`Sync Visibility of Project and MixConsole`をoffにし、P08をProject windowだけでhideして`S8-project-only-hide`を記録する。separate MixConsoleまたは同期toggleを利用できないrunでは、このsubcaseを`n/a`または`UNSUPPORTED`としてstep 16へ進む。lower-zoneだけのrunはtoggleが存在しない正常な`n/a`であり、`UNSUPPORTED`ではない。
-16. separate MixConsoleでは`Sync Visibility of Project and MixConsole`をonへ戻し、P08がProject windowとMixConsoleの両方でhiddenになるbaseline visibilityを復元して`S8-restore`を記録する。lower-zoneではProject側のP08をhiddenへ戻して自動追従を確認する。
-17. M1を保存する。
+15. primary runではseparate MixConsoleと利用可能な`Sync Visibility of Project and MixConsole`を必須とする。同期をoffにし、P08をProject windowだけでhideして`S8-project-only-hide`を記録する。toggleを利用できないrunはprimary auditを停止し、lower-zoneだけの結果は別のsupplemental runとして扱う。
+16. separate MixConsoleの同期をonへ戻し、P08がProject windowとMixConsoleの両方でhiddenになるbaseline visibilityを復元して`S8-restore`を記録する。M1の保存も`S8-restore`のaction後・final snapshot前に完了し、保存に伴うcallbackを同checkpointへ含める。
+17. `S8-restore`のfinal snapshotとquietが完了してから次へ進む。
 18. E0へ切り替えて`S9-empty`、M1へ戻って`S9-mutation`、C1 baselineへ戻って`S9-baseline`を記録する。
 
-各checkpointにCallback観測windowを個別に適用します。rename / add / deleteのためのselection操作を同じcheckpointへ混ぜず、途中で`INCONCLUSIVE_CALLBACK_TIMEOUT`になった場合は次の操作へ進みません。
+各checkpointにCallback観測windowを個別に適用し、対象access projectionごとの明示的final snapshotを取得します。rename / add / deleteのためのselection操作を同じcheckpointへ混ぜず、途中で`INCONCLUSIVE_CALLBACK_TIMEOUT`になった場合は次の操作へ進みません。
 
 期待するUI差分:
 
@@ -326,14 +385,16 @@ script reloadとCubase再起動はbaseline作成へ混ぜず、C1を開いた独
 
 | phase | 手順 | checkpoint |
 | --- | --- | --- |
-| R1 | MIDI Remote Script Consoleにprobeが表示されていることを確認 → C1 snapshot → Reload Scripts → 新しいload / reinitialize markerを確認 → 最大`reconnect_deadline_ms`まで再接続待ち → C1 snapshot | callback再初期化、reload前後のID比較 |
-| R2 | C1 snapshot → Cubaseを正常終了 → 同じversionを1 instance起動 → C1を開く → 最大`reconnect_deadline_ms`までready待ち → snapshot | restart後のID、初期callback、接続状態 |
+| R1 | `S9-baseline`のfinal snapshotをpre-reload状態として固定 → action marker → Reload Scripts → 新しいload / reinitialize marker → 再discover → actionから5000 ms以上観測 → 明示的C1 final snapshot | callback再初期化、reload前後のID比較 |
+| R2 | R1のfinal snapshotをpre-restart状態として固定 → action marker → Cubaseを正常終了 → 同じversionを1 instance起動 → C1を開く → ready → 再discover → actionから5000 ms以上観測 → 明示的final snapshot | restart後のID、初期callback、接続状態 |
 
-R1/R2の`reconnect_deadline_ms`は既定`30000`とし、run情報へ記録します。期限内に接続と必要な初期snapshotを確認できなければ、そのphaseを`INCONCLUSIVE_RECONNECT_TIMEOUT`として停止し、待ち続けたり後続phaseへ進んだりしません。R1/R2は未保存の通常projectがないことを再確認してから行います。IDの維持・変更は観測値であり、このfixtureのpass条件にはしません。
+R1/R2の`reconnect_deadline_ms`は既定`30000`とし、action markerから新sessionのreadyと再discover完了までへ適用します。final snapshotはactionから5000 ms以上かつready / discovery後に行い、ready / discovery完了から`10000 ms`以内に完了させます。30秒のreconnect期限へ追加観測時間を混ぜず、期限内にready / discoveryを確認できなければ、そのphaseを`INCONCLUSIVE_RECONNECT_TIMEOUT`として停止します。R1/R2内でpre-action snapshot commandを重複実行せず、直前checkpointの監査済みfinal snapshotをpre-stateとして参照します。R1/R2は未保存の通常projectがないことを再確認してから行います。IDの維持・変更は観測値であり、このfixtureのpass条件にはしません。
 
 ## Case O1: Input / Output / VCA（任意）
 
-このcaseはC1からSave Asしたcopyで行い、core baselineへ混ぜません。
+このcaseは将来の別profile用手順であり、audit manifest v1とprimary Track Probeでは実施できません。primary Probeは`MB_OPTIONAL_*` config自体を作成しません。DirectAccessはhost treeの構造上Input / Output / VCA等のnodeを通過し得ますが、固定fixture allowlist外のtitle、unique name、host ID、自由形式type / error文字列はProbe内でframe生成前にredactし、raw JSONLへ収集しません。安全なtree位置、親子関係、boolean / numeric値、固定type categoryとredaction件数だけをscope観測へ残します。v1 manifestは`optional_o1.status = "skipped"`と固定理由`not_separately_authorized`だけを受け付け、O1 projectを作成せず、以下の手順1以降を実行しません。
+
+将来O1を実施する場合は、通常fixtureとは別の明示的な許可、O1専用Probe build / capability / audit profile、pre-run inventory、local UI記録、cleanup後の完全一致を先に定義します。primary 44-checkpoint runへoptional configを追加したり、manifestのstatusだけを`observed`へ変更したりしてはいけません。
 
 期待するoptional entity:
 
@@ -370,7 +431,7 @@ API 1.1のleft / right configは、同一filter categoryの`include*`が対象zo
 12. Input / Output bus inventoryをpre-run記録と照合し、visibility同期をrun前の状態へ戻す。完全に一致しない場合は通常projectを開かず`RESTORE_FAILED`として停止し、手動復旧が完了するまで続行しない。
 13. inventory一致後、bus削除によるO1のcleanup差分は保存せずにO1を閉じる。必要ならE0を開いてinventoryを再確認してから通常projectへ戻る。O1を後日再度開いた場合もstep 11〜13のcleanupを繰り返す。
 
-VCA非対応、bus変更が通常環境へ影響する、または`Not Connected`にできない場合は省略します。省略理由をrun情報へ記録し、別typeで代用しません。
+現行v1では常に省略します。将来profileでも、別途許可がない、VCA非対応、bus変更が通常環境へ影響する、または`Not Connected`にできない場合は省略し、別typeで代用しません。
 
 ## Run終了時のcleanup
 
@@ -381,74 +442,147 @@ fixture作成前にseparate MixConsoleの同期toggleが`on` / `off` / `not open
 3. fixture project以外を変更・保存していないことを確認する。
 4. 原状回復を確認できない場合は`RESTORE_FAILED`として停止し、通常projectを開かない。
 
-## 観測ログ
+## runtime evidenceの3 artifact
 
-raw probe logはlocal artifactとし、repositoryには結論と再現に必要な最小例だけを`docs/track-api-host-spike.md`へ転記します。各recordは最低限次を持ちます。
+runtime evidenceは、用途の異なる次の3 artifactを混ぜません。
 
-```text
-run_id
-fixture_revision
-sequence
-monotonic_timestamp_ms
-request_started_ms
-request_finished_ms
-elapsed_ms
-configured_timeout_ms
-capability_result
-source                 # mixer_bank / direct_access / ui_snapshot
-event                  # initial / title / selected / mute / solo / added / removed / activated
-bank_or_tree_index
-slot_index
-fixture_label          # 対応を確認できた場合だけ
-host_id                # local raw logのみ。APIが返した値を推測しない
-host_id_alias          # committed result用のrun-local alias
-host_id_byte_length
-host_id_sha256         # committed resultで同一性比較が必要な場合
-requested_title
-accepted_ui_title
-returned_title
-type                   # APIが返した値。推測しない
-selected
-mute
-solo
-project_visible
-mixconsole_visible
-mixconsole_surface
-visibility_sync
-follow_visibility
-included_channel_types
-excluded_channel_types
-included_window_zones
-excluded_window_zones
-explicit_main_filter_capability
-result_class           # PASS / FAIL / UNSUPPORTED / INCONCLUSIVE
-notes
+1. **raw collector JSONL v1**: collectorがstdoutへflushするmachine event stream。repository外に保持し、callback、request / response、chunk、raw host ID、checkpoint markerを受信順のまま含む。fixture revision、UI確認、host version、実施許可を各raw recordへ後付けしたり、UI値でhost payloadを補完したりしない。
+2. **audit manifest v1 / UI annotation sidecar**: operatorがrun前にtemplateを用意し、最初のraw recordと各checkpointの確認後に完成させるversioned JSON。raw JSONLと同じ`run_id`を持ち、環境・digest・期待profile・UI ground truth確認を結び付ける。raw host ID、MIDI port名、absolute path、device名を含めない。
+3. **redacted audit report**: fail-closed auditorがraw JSONLとmanifestを両方検証して生成する共有可能な集計。raw `run_id`をechoせず、そのSHA-256先頭16 hexから作る`run-<16-hex>` alias、両inputのSHA-256、環境・artifact digest、checkpointごとのfinal snapshot projectionを含む。通常titleとP05はfixture revision 2の固定allowlistへexact一致した値だけ、P09は予約marker `CMCP_09_LONG_`全体を含む固定80文字のprefix policyへ一致した値だけを出し、host IDはrun-local aliasだけを出力する。それ以外の文字列は分類と件数へredactする。repositoryへ転記できるのは、この検証を通過し、別途secret / path確認を終えたreportの最小部分だけである。
+
+raw JSONL単独の`collector_summary.exit_ok`は通信integrityだけを表し、fixture coverage、UI ground truth、exact host、digest一致、O1許可を証明しません。manifest単独も、実際のcallback、final snapshot、時間window、sequence integrityを証明しません。どちらか一方しかないrunを`OBSERVED`へ使いません。
+
+audit manifest v1の論理schemaは次です。auditorは`profile`と`fixture_revision`から必須checkpoint集合を固定的に導出し、入力側がannotationを省略して検査範囲を狭めることを許しません。
+
+```json
+{
+  "audit_manifest_version": 1,
+  "fixture_revision": 2,
+  "profile": "c13_mixer_bank",
+  "run_id": "mac-c13-r2-001",
+  "run_started_at": "2026-08-27T12:00:00.123+09:00",
+  "environment": {
+    "host": {
+      "product": "Cubase Pro",
+      "version": "13.0.30.226",
+      "api_version": "1.1"
+    },
+    "os": {
+      "name": "macOS",
+      "version": "26.5.1",
+      "build": "25F80",
+      "architecture": "arm64"
+    },
+    "repository_commit": "<40-hex>",
+    "probe_source_sha256": "<64-hex>",
+    "installer_embedded_sha256": "<64-hex>",
+    "deployed_probe_sha256": "<64-hex>",
+    "collector_binary_sha256": "<64-hex>"
+  },
+  "callback_window_ms": 5000,
+  "reconnect_deadline_ms": 30000,
+  "mixconsole": {
+    "surface": "separate",
+    "visibility_sync_initial": "not_open",
+    "visibility_sync_during_baseline": "on",
+    "visibility_sync_restored": true
+  },
+  "filters": {
+    "bank_width": 8,
+    "core_all_follow_visibility": false,
+    "core_visible_follow_visibility": true,
+    "included_channel_types": ["audio", "instrument", "midi", "group", "fx"],
+    "excluded_channel_types": ["sampler", "vca", "input", "output"],
+    "left_zone": "excluded",
+    "right_zone": "excluded",
+    "main_filter": "implicit"
+  },
+  "fixture_acceptance": {
+    "alternate_plugins": {
+      "instrument": {
+        "status": "none"
+      },
+      "effect": {
+        "status": "none"
+      }
+    },
+    "p05_title": {
+      "policy": "nfc_or_nfd_exact",
+      "accepted_title": "CMCP_05_日本語_é_🎹",
+      "unicode_scalar_count": 15,
+      "utf8_byte_length": 25,
+      "setup_variance": false
+    },
+    "p09_title": {
+      "policy": "fixed_name_prefix",
+      "accepted_title": "CMCP_09_LONG_ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNO",
+      "unicode_scalar_count": 80,
+      "utf8_byte_length": 80,
+      "setup_variance": false
+    }
+  },
+  "optional_o1": {
+    "status": "skipped",
+    "reason": "not_separately_authorized"
+  },
+  "annotations": [
+    {
+      "checkpoint_id": "<required-checkpoint-id>",
+      "result": "observed",
+      "ui_ground_truth_confirmed": true,
+      "action_confirmed": true
+    }
+  ]
+}
 ```
 
-APIが提供しないfieldは`null`または`not available`とし、直前値で埋めません。callbackの受信順を保ち、同一timestampへ並べ替えません。raw host IDはlocal logから外へ出さず、committed resultではrun-local alias、byte length、必要な場合だけSHA-256 digestで同一性を表現します。名前、index、typeからIDを生成してはいけません。
+Cubase 13 runは`c13_mixer_bank`、Cubase 15でMixer BankとDirectAccessを同時観測するrunは`c15_combined`を使います。`c13_mixer_bank`というprofile名はDirectAccess非対応を意味せず、INITのruntime capabilityがsupported / activeなら同じ44 checkpointへDirectAccess projectionも条件付きで必須化します。`run_started_at`はtimezone offsetとミリ秒を含むRFC 3339で記録し、そのUnix millisecond値がraw `collector_started.timestamp_unix_ms`と完全一致しなければなりません。最初のraw recordを受け取った後、その値からsidecarへ転記し、目視時刻やcollector起動commandの実行時刻で代用しません。primary runのMixConsole surfaceは`separate`固定で、baseline中のvisibility syncは`on`、終了時はrun前の`on` / `off` / `not_open`へ復元します。filter配列と順序は上例へ固定し、C13の`main_filter`は`implicit`、C15は`explicit`です。auditorはINITのcapability responseにあるbank幅、config ID、main filter、DirectAccess能力と照合します。
 
-snapshotごとに、期待するfixture label、観測できたlabel、missing、duplicate、scope外またはunknownを別々に集計します。`UNSUPPORTED`とtimeout等による`INCONCLUSIVE`を`PASS`へ含めません。
+`fixture_acceptance`はUIが実際に受理したfixture値をraw snapshotへ結び付けます。InstrumentとEffectを別々に記録し、plug-in不要なら各`status = "none"`、作成に代替が必要だった側だけ`status = "used"`としてboundedな`accepted_name`をlocal sidecarへ記録します。両方が必要なら異なる2つの名前をそれぞれ保持し、1つへ連結しません。P05の`accepted_title`は上記固定NFCまたはその固定NFD表現だけ、P09は予約marker `CMCP_09_LONG_`を完全に含む上記80文字のprefixだけを許し、scalar / byte数と`setup_variance`を実値から検証します。auditorは対象Trackが含まれるfinal snapshotのtitleと照合し、欠落やhost側の表現差はintegrity failureへ変換せずsemantic comparisonへ明示します。redacted reportは代替plug-in名を出力せず、固定fixtureから導出できるallowlist titleだけを共有します。
+
+`annotations`は自由記述の作業メモではなく必須UI確認sidecarです。各entryは同名のraw checkpointと`collector_action` markerへexactly once対応し、marker直後に指定操作だけを行い、UI上でこの文書の件数、順序、名前、state、visibilityを確認できた場合だけ`observed / true / true`にします。確認不能、差異、操作ミスは成功値へ変更せずrunを停止し、再現runを作ります。R1 / R2のaction時刻はmanifestへ手入力せず、raw markerのclockを唯一の基準にします。
+
+revision 2の両profileで必須annotation / raw checkpointは次のexactly 44 IDです。以下の列挙順をchronological begin順として固定し、各checkpointを前の`end`後にだけ開始します。同じ集合でも並べ替え、重複、overlapしたrunは受理しません。
+
+- setup / initial cases: `INIT`、`E0`、`E1`
+- E8 project open / ground truth: `E8`
+- E8 exact-width: `E8-MB_CORE_ALL-B0-reset`、`E8-MB_CORE_ALL-B1-next`、`E8-MB_CORE_ALL-B2-prev`、`E8-MB_CORE_ALL-B3-reset`と、同じ4 suffixの`E8-MB_CORE_VISIBLE-*`
+- C1 baseline / bank-width-exceeded: `C1`、続けて`C1-MB_CORE_ALL-B0-reset`、`B1-next`、`B2-next`、`B3-extra-next`、`B4-prev`、`B5-reset`と、同じ6 suffixの`C1-MB_CORE_VISIBLE-*`
+- mutation / project switch: `S0`、`S1-select`、`S1-rename`、`S2-select-anchor`、`S2-add`、`S3-select-delete`、`S3-delete`、`S4-show`、`S5-select-anchor`、`S5-select-change`、`S6-mute`、`S7-solo`、`S8-project-only-hide`、`S8-restore`、`S9-empty`、`S9-mutation`、`S9-baseline`
+- lifecycle: `R1`、`R2`
+
+profile名はcheckpoint IDへ重ねて付けず、manifestの`profile`でnamespaceを分離します。必須`E8` checkpointでprojectを開いてcase-level UI ground truthを確認し、続く8個のnavigation checkpointでも各境界状態を確認します。E8 / C1 navigationは操作対象configを、その他のcheckpointは`MB_CORE_ALL`と`MB_CORE_VISIBLE`の両方をsnapshotにします。C15 combined profile、およびDirectAccessがruntimeでsupported / activeだったC13 profileでは、44個をMixer Bank用とDirectAccess用に複製せず、各同一checkpoint内でDirectAccessの明示的final snapshotを先に、必要なbank snapshotをその後に取得します。
+
+APIが提供しないfieldはraw logとredacted reportの双方で`null`または`not available`とし、直前値で埋めません。callbackの受信順を保ち、同一timestampへ並べ替えません。raw host IDはlocal JSONLから外へ出さず、redacted reportではrun-local alias、byte length、必要な場合だけSHA-256 digestで同一性を表現します。名前、index、typeからIDを生成してはいけません。
+
+redacted reportでは最後の監査対象snapshotごとに、slot / tree順、allowlistへ一致した合成title、nullable state、run-local host ID alias、missing、duplicate、scope外またはunknown / redacted件数を別々に集計します。Mixer Bank callback値はProbeがcallback発生時に刻んだfield別`observation_epoch`がそのcheckpointのcut responseと一致した場合だけ`fresh`とし、cut前のqueueが後からflushされても`fresh`へ繰り上げません。旧epochや未観測のfieldは`stale` / `not available`として値を`null`にし、source側redactionとは別に集計します。DirectAccessのcallbackとlive snapshotも各recordのepoch / statusを検証します。raw JSONL / manifestのSHA-256で同じrunへ固定し、同じ環境の別runで穴埋めしません。`UNSUPPORTED`とtimeout等による`INCONCLUSIVE`を`PASS`へ含めません。snapshot内容が期待と異なっても証拠stream自体が完全ならauditorのmachine-readable integrity `status`は`evidence_valid`、`semantic_assessment`は`observed_not_evaluated`になり得ますが、semantic projectionの差分を隠して機能上の`PASS`へ読み替えてはいけません。
 
 ## 再現性チェックリスト
 
 実機run前に次を確認します。
 
 - [ ] run情報に正確なOS、Cubase version/build、MIDI Remote APIを記録した
+- [ ] audit manifest v1の`fixture_revision`が`2`で、raw JSONLと`run_id`が一致する
 - [ ] E0のProject Trackが0本である
+- [ ] E8がAudio Track 8本だけで、E8-01〜E8-08の順・state・visibilityが一致する
+- [ ] E8の両primary configでReset / Next / Prev / Resetを独立windowとして観測した
 - [ ] C1が20本で、P01〜P20の順番・type・Cubaseが受理したUI ground truth名が一致する
 - [ ] E1がAudio Track 1本だけである
 - [ ] P02/P03が同名で、MuteとSoloが別々に設定されている
 - [ ] P13〜P20がselected / mute / soloの8通りを1回ずつ表している
-- [ ] Unicode名と117文字のASCII要求名について、要求値とCubaseが受理した実値・長さを記録した
+- [ ] Unicode名と80文字のASCII要求名について、要求値とCubaseが受理した実値・長さを記録した
 - [ ] P01 Folderが空で、Group / Effect Trackがproject直下にある
 - [ ] P08だけがhiddenで、P17〜P20だけがselected、P20が最後に選択したTrackである
 - [ ] Record Enable、Monitor、Automation Writeが全てoffである
 - [ ] event、part、automation、imported mediaがない
 - [ ] 8-slot bankを超えるTrack数がある
+- [ ] 全44 checkpointでexactly 1 action markerを記録し、cut対象21 checkpointでは成功response直後のatomic output pairに同request / epochの自動markerがあり、別のmanual markerを送らず、そのmarker直後にUI操作を行い、checkpoint種別ごとの観測anchorから5000 ms以上後に各access projectionの明示的final snapshotを取得した
+- [ ] final snapshot完了後にprobe messageが1件もなく、追加1000 msのquiet periodを満たした
 - [ ] Mixer Bank configでchannel typeとleft / right zoneを明示し、main filter capabilityとimplicit / explicit scopeを記録した
 - [ ] mutationはM1 copyで行い、C1 baselineを変更していない
-- [ ] optional caseの実施結果または省略理由を記録した
-- [ ] separate MixConsole同期とoptional bus inventoryをrun前の状態へ戻した
+- [ ] audit v1ではO1を実施せず、`skipped / not_separately_authorized`を記録した
+- [ ] primary runでseparate MixConsoleを使い、visibility同期をrun前の状態へ戻し、optional bus inventoryへ触れていない
+- [ ] redacted reportの`run-<16-hex>` alias、raw JSONL digest、manifest digest、semantic projectionを保存した
 - [ ] `.cpr`、raw log、device名、absolute path、credentialをGitへ追加していない
 - [ ] `git status --short`と`git diff --name-only`に意図した文書以外のfixture artifactがない
 

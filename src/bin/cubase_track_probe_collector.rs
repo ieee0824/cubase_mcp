@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fmt;
-use std::io::{self, BufRead, Write};
+use std::fs::File;
+use std::io::{self, BufRead, Read, Write};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
@@ -17,6 +18,7 @@ use midir::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 
 const TO_CUBASE_PORT: &str = "Cubase MCP Track Probe To Cubase";
 const FROM_CUBASE_PORT: &str = "Cubase MCP Track Probe From Cubase";
@@ -30,6 +32,7 @@ const MAX_STDIN_COMMAND_BYTES: usize = MAX_JSON_BYTES;
 const MIDI_QUEUE_CAPACITY: usize = 1024;
 const MAX_SOURCE_INSTANCES: usize = 16;
 const MAX_INSTANCE_ID_BYTES: usize = 128;
+const SELECTED_TARGET_ALIAS: &str = "@selected";
 const MAX_REQUEST_ID_BYTES: usize = 256;
 const MAX_METHOD_BYTES: usize = 128;
 const MAX_RUN_ID_BYTES: usize = 128;
@@ -51,7 +54,39 @@ const CHECKPOINT_QUIET_PERIOD: Duration = Duration::from_millis(1_000);
 const DEFAULT_GRACEFUL_DRAIN_MS: u64 = 5_000;
 const DEFAULT_DISCOVERY_WINDOW_MS: u64 = 1_000;
 const MAX_COLLECTOR_WAIT_MS: u64 = 600_000;
+const MAX_OBSERVATION_EPOCH: u64 = 2_147_483_647;
 const RECORD_FORMAT_VERSION: u32 = 1;
+const HASH_READ_BUFFER_BYTES: usize = 64 * 1024;
+
+fn current_executable_sha256() -> Result<String, String> {
+    let executable = env::current_exe()
+        .map_err(|error| format!("could not resolve the running collector binary: {error}"))?;
+    let file = File::open(executable)
+        .map_err(|error| format!("could not open the running collector binary: {error}"))?;
+    sha256_reader(file)
+        .map_err(|error| format!("could not hash the running collector binary: {error}"))
+}
+
+fn sha256_reader(mut reader: impl Read) -> io::Result<String> {
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; HASH_READ_BUFFER_BYTES];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => hasher.update(&buffer[..read]),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = hasher.finalize();
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    Ok(encoded)
+}
 
 fn main() -> ExitCode {
     match run() {
@@ -78,6 +113,7 @@ fn run() -> Result<bool, String> {
         }
     };
 
+    let collector_binary_sha256 = current_executable_sha256()?;
     let started_at = Instant::now();
     let integrity_failed = Arc::new(AtomicBool::new(false));
     let runtime = Arc::new(RuntimeTracker::new());
@@ -98,6 +134,8 @@ fn run() -> Result<bool, String> {
         "record_type": "collector_started",
         "timestamp_unix_ms": unix_timestamp_ms(),
         "session_id": session_id,
+        "collector_version": env!("CARGO_PKG_VERSION"),
+        "collector_binary_sha256": collector_binary_sha256,
         "probe_transport_version": PROBE_TRANSPORT_VERSION,
         "midi_mode": mode,
         "virtual_to_cubase_port": (mode == "virtual").then_some(TO_CUBASE_PORT),
@@ -378,11 +416,42 @@ macOS/Linux default virtual ports:
 Windows requires both MIDI port options. On macOS/Linux, passing both options
 selects existing ports instead of creating the dedicated virtual ports.
 
-stdin accepts one JSON command per line. The collector assigns the request id:
+stdin accepts one JSON command per line. The collector assigns the request id.
+This C15/DirectAccess-active example shows the required command order; perform
+the indicated host action and waits between lines rather than pasting it as a
+batch:
+  {"method":"collector.checkpoint.begin","params":{"checkpoint_id":"INIT","window_ms":5000}}
+  {"method":"collector.action","params":{"checkpoint_id":"INIT"}}
+  [start Cubase and wait for probe.ready]
   {"target_instance_id":null,"method":"probe.discover","params":{}}
-  {"target_instance_id":"track-probe-...","method":"probe.bank.reset","params":{"config_id":"MB_CORE_ALL"}}
-  {"method":"collector.checkpoint.begin","params":{"checkpoint_id":"S1","window_ms":5000}}
-  {"method":"collector.checkpoint.end","params":{"checkpoint_id":"S1"}}
+  {"target_instance_id":"@selected","method":"probe.capabilities.get","params":{}}
+  [wait until 5000 ms after collector.action]
+  {"target_instance_id":"@selected","method":"probe.direct_access.snapshot","params":{}}
+  {"target_instance_id":"@selected","method":"probe.bank.snapshot","params":{"config_id":"MB_CORE_ALL"}}
+  {"target_instance_id":"@selected","method":"probe.bank.snapshot","params":{"config_id":"MB_CORE_VISIBLE"}}
+  [wait for every follow-up and 1000 ms message-free quiet]
+  {"method":"collector.checkpoint.end","params":{"checkpoint_id":"INIT"}}
+  {"method":"collector.checkpoint.begin","params":{"checkpoint_id":"E0","window_ms":5000}}
+  {"target_instance_id":"@selected","method":"probe.observation.cut","params":{}}
+  [wait for the successful cut response and adjacent automatic action marker]
+  [perform the E0 UI action immediately, then wait 5000 ms from that marker]
+  {"target_instance_id":"@selected","method":"probe.direct_access.snapshot","params":{}}
+  {"target_instance_id":"@selected","method":"probe.bank.snapshot","params":{"config_id":"MB_CORE_ALL"}}
+  {"target_instance_id":"@selected","method":"probe.bank.snapshot","params":{"config_id":"MB_CORE_VISIBLE"}}
+  [wait for every follow-up and 1000 ms message-free quiet]
+  {"method":"collector.checkpoint.end","params":{"checkpoint_id":"E0"}}
+
+Wait for every response/follow-up before the next JSON command that depends on
+it. A successful observation cut atomically emits its probe_response followed by
+the checkpoint's collector_action marker; do not send collector.action again.
+DirectAccess-unsupported runs omit only the DirectAccess snapshot. The revision
+2 fixture is authoritative for all 44 checkpoints.
+
+@selected is a collector-local alias. It is accepted only after a completed
+exactly-one discovery window and is replaced with that source at the MIDI send
+barrier. The alias itself is never sent to Cubase. To avoid blocking MIDI input,
+its probe_command and send-result evidence is written to stdout immediately
+after the atomic send attempt; `sent` remains authoritative if stdout then fails.
 
 stdout is flushed JSON Lines. Redirect it explicitly if a raw observation file
 is required. Send stdin EOF (Ctrl-D) for a final summary. The collector never
@@ -1140,7 +1209,13 @@ fn encode_sysex(value: &impl Serialize) -> Result<Vec<u8>, CodecError> {
     encode_sysex_with_limit(value, MAX_JSON_BYTES, "OVERSIZE_FRAME")
 }
 
-fn encode_request_sysex(value: &impl Serialize) -> Result<Vec<u8>, CodecError> {
+fn encode_request_sysex(value: &ProbeRequestEnvelope) -> Result<Vec<u8>, CodecError> {
+    if value.target_instance_id.as_deref() == Some(SELECTED_TARGET_ALIAS) {
+        return Err(CodecError::new(
+            "UNRESOLVED_TARGET_ALIAS",
+            "collector-local target alias must be resolved before MIDI encoding",
+        ));
+    }
     encode_sysex_with_limit(value, MAX_OUTBOUND_JSON_BYTES, "OVERSIZE_COMMAND")
 }
 
@@ -1346,6 +1421,9 @@ enum ParsedCommand {
         checkpoint_id: String,
         window: Duration,
     },
+    Action {
+        checkpoint_id: String,
+    },
     CheckpointEnd {
         checkpoint_id: String,
     },
@@ -1361,6 +1439,12 @@ struct CheckpointBeginParams {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CheckpointEndParams {
+    checkpoint_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActionParams {
     checkpoint_id: String,
 }
 
@@ -1435,6 +1519,20 @@ fn parse_command(
             .map_err(|error| CommandError::new("INVALID_CHECKPOINT_PARAMS", error.to_string()))?;
         validate_checkpoint_id(&params.checkpoint_id)?;
         return Ok(ParsedCommand::CheckpointEnd {
+            checkpoint_id: params.checkpoint_id,
+        });
+    }
+    if command.method == "collector.action" {
+        if command.target_instance_id.is_some() {
+            return Err(CommandError::new(
+                "INVALID_COMMAND_TARGET",
+                "local collector action commands must not specify target_instance_id",
+            ));
+        }
+        let params: ActionParams = serde_json::from_value(command.params)
+            .map_err(|error| CommandError::new("INVALID_ACTION_PARAMS", error.to_string()))?;
+        validate_checkpoint_id(&params.checkpoint_id)?;
+        return Ok(ParsedCommand::Action {
             checkpoint_id: params.checkpoint_id,
         });
     }
@@ -1609,6 +1707,45 @@ fn process_stdin_commands(
                     break;
                 }
             }
+            ParsedCommand::Action { checkpoint_id } => {
+                report.local_commands += 1;
+                let barrier = match ingress_progress.synchronize_held(integrity_failed) {
+                    Ok(barrier) => barrier,
+                    Err(fault) => {
+                        report.rejected += 1;
+                        emit_tracker_faults(vec![fault], sink, integrity_failed, "fatal");
+                        continue;
+                    }
+                };
+                let mut tracker = runtime.state.lock().unwrap_or_else(|error| {
+                    integrity_failed.store(true, Ordering::Release);
+                    error.into_inner()
+                });
+                let marker_result = tracker.mark_action(&checkpoint_id);
+                // The barrier defines the action cut, but stdout must not hold up MIDI
+                // callback admission. The operator performs the action only after this
+                // synchronous marker emission returns.
+                drop(tracker);
+                drop(barrier);
+                runtime.notify();
+                match marker_result {
+                    Ok(marker) => {
+                        if let Err(error) = sink.emit(&marker) {
+                            report.input_failed = true;
+                            report.exit_reason = "stdout_error";
+                            integrity_failed.store(true, Ordering::Release);
+                            eprintln!("could not write collector action marker: {error}");
+                        }
+                    }
+                    Err(fault) => {
+                        report.rejected += 1;
+                        emit_tracker_faults(vec![fault], sink, integrity_failed, "fatal");
+                    }
+                }
+                if report.input_failed {
+                    break;
+                }
+            }
             ParsedCommand::CheckpointEnd { checkpoint_id } => {
                 report.local_commands += 1;
                 let barrier = match ingress_progress.synchronize_held(integrity_failed) {
@@ -1661,7 +1798,7 @@ fn process_stdin_commands(
                     break;
                 }
             }
-            ParsedCommand::Probe(envelope) => {
+            ParsedCommand::Probe(mut envelope) => {
                 command_sequence = match command_sequence.checked_add(1) {
                     Some(next) => next,
                     None => {
@@ -1711,18 +1848,24 @@ fn process_stdin_commands(
                     continue;
                 }
 
-                let frame = match encode_request_sysex(&envelope) {
-                    Ok(frame) => frame,
-                    Err(error) => {
-                        report.rejected += 1;
-                        let _ = emit_diagnostic(
-                            sink,
-                            error.code,
-                            "error",
-                            &error.message,
-                            json!({"request_id": envelope.message.id}),
-                        );
-                        continue;
+                let uses_selected_target_alias =
+                    envelope.target_instance_id.as_deref() == Some(SELECTED_TARGET_ALIAS);
+                let frame = if uses_selected_target_alias {
+                    None
+                } else {
+                    match encode_request_sysex(&envelope) {
+                        Ok(frame) => Some(frame),
+                        Err(error) => {
+                            report.rejected += 1;
+                            let _ = emit_diagnostic(
+                                sink,
+                                error.code,
+                                "error",
+                                &error.message,
+                                json!({"request_id": envelope.message.id}),
+                            );
+                            continue;
+                        }
                     }
                 };
 
@@ -1746,13 +1889,15 @@ fn process_stdin_commands(
                     .expect("registered request has a checkpoint")
                     .to_owned();
 
-                if let Err(error) = sink.emit(&json!({
-                    "record_type": "probe_command",
-                    "phase": "started",
-                    "request_id": request_id,
-                    "checkpoint_id": request_checkpoint_id,
-                    "request": &envelope
-                })) {
+                if !uses_selected_target_alias
+                    && let Err(error) = sink.emit(&json!({
+                        "record_type": "probe_command",
+                        "phase": "started",
+                        "request_id": request_id,
+                        "checkpoint_id": request_checkpoint_id,
+                        "request": &envelope
+                    }))
+                {
                     tracker.cancel_request(&request_id);
                     report.input_failed = true;
                     report.exit_reason = "stdout_error";
@@ -1791,7 +1936,11 @@ fn process_stdin_commands(
                     integrity_failed.store(true, Ordering::Release);
                     error.into_inner()
                 });
-                let validation = tracker.validate_request_before_send(&request_id);
+                let validation = if uses_selected_target_alias {
+                    tracker.resolve_selected_target_alias_before_send(&mut envelope)
+                } else {
+                    tracker.validate_request_before_send(&request_id)
+                };
                 if observation_integrity_failed(integrity_failed, sink) || validation.is_err() {
                     tracker.cancel_request(&request_id);
                     drop(tracker);
@@ -1829,9 +1978,114 @@ fn process_stdin_commands(
                     continue;
                 }
 
+                if uses_selected_target_alias {
+                    let frame = match encode_request_sysex(&envelope) {
+                        Ok(frame) => frame,
+                        Err(error) => {
+                            tracker.cancel_request(&request_id);
+                            drop(tracker);
+                            drop(send_barrier);
+                            runtime.notify();
+                            report.rejected += 1;
+                            let _ = sink.emit(&json!({
+                                "record_type": "probe_command_send_result",
+                                "request_id": request_id,
+                                "checkpoint_id": request_checkpoint_id,
+                                "sent": false,
+                                "reason": "target_resolution_encoding_failure"
+                            }));
+                            let _ = emit_diagnostic(
+                                sink,
+                                error.code,
+                                "error",
+                                &error.message,
+                                json!({"request_id": request_id}),
+                            );
+                            continue;
+                        }
+                    };
+                    let command_record = json!({
+                        "record_type": "probe_command",
+                        "phase": "started",
+                        "request_id": request_id,
+                        "checkpoint_id": request_checkpoint_id,
+                        "request": &envelope,
+                        "evidence_emission": "after_midi_send_attempt"
+                    });
+                    let (send_result_record, midi_send_error) = match output.send(&frame) {
+                        Ok(()) => {
+                            let sent_at = Instant::now();
+                            tracker.mark_request_sent(&request_id, sent_at, discovery_window);
+                            report.sent += 1;
+                            (
+                                json!({
+                                    "record_type": "probe_command_send_result",
+                                    "request_id": request_id,
+                                    "checkpoint_id": request_checkpoint_id,
+                                    "sent": true,
+                                    "sysex_bytes": frame.len(),
+                                    "evidence_emission": "after_midi_send_attempt",
+                                    "send_completed_monotonic_timestamp_ms": sink.monotonic_timestamp_at(sent_at)
+                                }),
+                                None,
+                            )
+                        }
+                        Err(error) => {
+                            let failed_at = Instant::now();
+                            tracker.cancel_request(&request_id);
+                            report.rejected += 1;
+                            report.input_failed = true;
+                            report.exit_reason = "midi_send_error";
+                            integrity_failed.store(true, Ordering::Release);
+                            (
+                                json!({
+                                    "record_type": "probe_command_send_result",
+                                    "request_id": request_id,
+                                    "checkpoint_id": request_checkpoint_id,
+                                    "sent": false,
+                                    "reason": "midi_send_error",
+                                    "evidence_emission": "after_midi_send_attempt",
+                                    "send_failed_monotonic_timestamp_ms": sink.monotonic_timestamp_at(failed_at)
+                                }),
+                                Some(error.to_string()),
+                            )
+                        }
+                    };
+                    drop(tracker);
+                    drop(send_barrier);
+                    runtime.notify();
+
+                    if let Err(error) = sink.emit_pair(&command_record, &send_result_record) {
+                        invalidate_after_selected_evidence_failure(
+                            &mut report,
+                            integrity_failed,
+                            midi_send_error.is_some(),
+                        );
+                        eprintln!(
+                            "could not write @selected probe evidence after the MIDI send attempt: {error}; the run is invalid and the request outcome must not be inferred from missing JSONL"
+                        );
+                    }
+                    if let Some(error) = midi_send_error {
+                        let _ = emit_diagnostic(
+                            sink,
+                            "MIDI_SEND_ERROR",
+                            "fatal",
+                            &format!("could not send probe request: {error}"),
+                            json!({"request_id": request_id}),
+                        );
+                    }
+                    if report.input_failed {
+                        break;
+                    }
+                    continue;
+                }
+
+                let frame = frame.expect("validated probe request has an encoded MIDI frame");
+
                 match output.send(&frame) {
                     Ok(()) => {
-                        tracker.mark_request_sent(&request_id, Instant::now(), discovery_window);
+                        let sent_at = Instant::now();
+                        tracker.mark_request_sent(&request_id, sent_at, discovery_window);
                         report.sent += 1;
                         drop(tracker);
                         drop(send_barrier);
@@ -1841,7 +2095,8 @@ fn process_stdin_commands(
                             "request_id": request_id,
                             "checkpoint_id": request_checkpoint_id,
                             "sent": true,
-                            "sysex_bytes": frame.len()
+                            "sysex_bytes": frame.len(),
+                            "send_completed_monotonic_timestamp_ms": sink.monotonic_timestamp_at(sent_at)
                         })) {
                             report.input_failed = true;
                             report.exit_reason = "stdout_error";
@@ -1886,6 +2141,18 @@ fn process_stdin_commands(
 
 fn observation_integrity_failed(integrity_failed: &AtomicBool, sink: &JsonlSink) -> bool {
     integrity_failed.load(Ordering::Acquire) || sink.failed()
+}
+
+fn invalidate_after_selected_evidence_failure(
+    report: &mut CommandReport,
+    integrity_failed: &AtomicBool,
+    midi_send_failed: bool,
+) {
+    if !midi_send_failed {
+        report.input_failed = true;
+        report.exit_reason = "stdout_error_after_midi_send";
+    }
+    integrity_failed.store(true, Ordering::Release);
 }
 
 fn emit_tracker_faults(
@@ -2094,6 +2361,7 @@ enum PendingMode {
 struct PendingRequest {
     method: String,
     mode: PendingMode,
+    selected_target_alias: bool,
     followup: Option<FollowupTemplate>,
     checkpoint_id: String,
 }
@@ -2164,6 +2432,7 @@ struct ActiveCheckpoint {
     window: Duration,
     message_count: u64,
     last_message_received_at: Option<Instant>,
+    action_marked: bool,
 }
 
 #[derive(Debug)]
@@ -2215,6 +2484,8 @@ struct ProtocolTracker {
     expected_followups: Vec<ExpectedFollowup>,
     open_snapshots: HashMap<SnapshotKey, ChunkStreamState>,
     completed_snapshots: HashSet<SnapshotKey>,
+    completed_snapshot_streams: usize,
+    completed_feedback_streams: usize,
     active_checkpoint: Option<ActiveCheckpoint>,
     completed_checkpoints: HashSet<String>,
     checkpoint_history: Vec<CompletedCheckpoint>,
@@ -2265,6 +2536,7 @@ impl ProtocolTracker {
             ));
         }
 
+        let mut selected_target_alias = false;
         let mode = if request.message.method == "probe.discover" {
             self.selected_source_instance_id = None;
             PendingMode::Discovery {
@@ -2274,16 +2546,22 @@ impl ProtocolTracker {
                 valid: true,
             }
         } else {
-            let target_instance_id = request
+            let requested_target_instance_id = request
                 .target_instance_id
                 .as_deref()
                 .expect("validated targeted probe request has a target");
-            let Some(selected_source_instance_id) = &self.selected_source_instance_id else {
+            let Some(selected_source_instance_id) = self.selected_source_instance_id.clone() else {
                 return Err(TrackerFault::new(
                     "DISCOVERY_REQUIRED",
                     "targeted probe commands require a completed exactly-one discovery window",
                     json!({"request_id": request_id}),
                 ));
+            };
+            let target_instance_id = if requested_target_instance_id == SELECTED_TARGET_ALIAS {
+                selected_target_alias = true;
+                selected_source_instance_id.clone()
+            } else {
+                requested_target_instance_id.to_owned()
             };
             if target_instance_id != selected_source_instance_id {
                 return Err(TrackerFault::new(
@@ -2291,27 +2569,26 @@ impl ProtocolTracker {
                     "target_instance_id does not match the source confirmed by discovery",
                     json!({
                         "request_id": request_id,
-                        "target_instance_id": target_instance_id,
+                        "target_instance_id": requested_target_instance_id,
                         "selected_source_instance_id": selected_source_instance_id
                     }),
                 ));
             }
-            if self.source_lifecycle.get(target_instance_id) != Some(&SourceLifecycle::Ready) {
+            if self.source_lifecycle.get(&target_instance_id) != Some(&SourceLifecycle::Ready) {
                 return Err(TrackerFault::new(
                     "TARGET_SOURCE_NOT_ACTIVE",
                     "the discovered target source is no longer active",
                     json!({"target_instance_id": target_instance_id}),
                 ));
             }
-            PendingMode::Targeted {
-                target_instance_id: target_instance_id.to_owned(),
-            }
+            PendingMode::Targeted { target_instance_id }
         };
         self.pending_requests.insert(
             request_id,
             PendingRequest {
                 method: request.message.method.clone(),
                 mode,
+                selected_target_alias,
                 followup: FollowupTemplate::for_request(
                     &request.message.method,
                     &request.message.params,
@@ -2335,6 +2612,12 @@ impl ProtocolTracker {
         self.pending_requests
             .get(request_id)
             .map(|request| request.checkpoint_id.as_str())
+    }
+
+    fn request_method(&self, request_id: &str) -> Option<&str> {
+        self.pending_requests
+            .get(request_id)
+            .map(|request| request.method.as_str())
     }
 
     fn validate_request_before_send(&self, request_id: &str) -> Result<(), TrackerFault> {
@@ -2386,6 +2669,44 @@ impl ProtocolTracker {
                 }),
             ));
         }
+        Ok(())
+    }
+
+    fn resolve_selected_target_alias_before_send(
+        &self,
+        request: &mut ProbeRequestEnvelope,
+    ) -> Result<(), TrackerFault> {
+        let request_id = request.message.id.as_str();
+        self.validate_request_before_send(request_id)?;
+        let pending = self
+            .pending_requests
+            .get(request_id)
+            .expect("validated request remains pending");
+        if !pending.selected_target_alias
+            || request.target_instance_id.as_deref() != Some(SELECTED_TARGET_ALIAS)
+            || request.message.method != pending.method
+        {
+            return Err(TrackerFault::new(
+                "TARGET_ALIAS_STATE_MISMATCH",
+                "the pending request does not match an unresolved selected-target alias",
+                json!({"request_id": request_id}),
+            ));
+        }
+        let PendingMode::Targeted { target_instance_id } = &pending.mode else {
+            return Err(TrackerFault::new(
+                "TARGET_ALIAS_STATE_MISMATCH",
+                "a discovery request cannot use the selected-target alias",
+                json!({"request_id": request_id}),
+            ));
+        };
+        if target_instance_id == SELECTED_TARGET_ALIAS {
+            return Err(TrackerFault::new(
+                "TARGET_ALIAS_COLLISION",
+                "the discovered source identifier collides with the reserved collector alias",
+                json!({"request_id": request_id}),
+            ));
+        }
+        request.target_instance_id = Some(target_instance_id.clone());
         Ok(())
     }
 
@@ -2938,6 +3259,23 @@ impl ProtocolTracker {
                 .expect("completed snapshot is open");
             faults.extend(state.finish(&key));
             self.completed_snapshots.insert(key.clone());
+            match chunk.stream.as_str() {
+                "mixer_bank_snapshot" | "direct_access_snapshot" => {
+                    self.completed_snapshot_streams =
+                        self.completed_snapshot_streams.saturating_add(1);
+                }
+                "mixer_bank_feedback" | "direct_access_feedback" => {
+                    self.completed_feedback_streams =
+                        self.completed_feedback_streams.saturating_add(1);
+                }
+                _ => {
+                    faults.push(TrackerFault::new(
+                        "CHUNK_STREAM_KIND_INVALID",
+                        "completed chunk stream had an unsupported kind",
+                        json!({"stream": &chunk.stream}),
+                    ));
+                }
+            }
             if let Some(index) = self.expected_followups.iter().position(|followup| {
                 followup.source_instance_id == source_instance_id
                     && followup_matches(
@@ -3018,6 +3356,7 @@ impl ProtocolTracker {
             window,
             message_count: 0,
             last_message_received_at: None,
+            action_marked: false,
         });
         Ok(json!({
             "record_type": "collector_checkpoint",
@@ -3025,6 +3364,68 @@ impl ProtocolTracker {
             "checkpoint_id": checkpoint_id,
             "window_ms": duration_ms(window)
         }))
+    }
+
+    fn mark_action(&mut self, checkpoint_id: &str) -> Result<Value, TrackerFault> {
+        let Some(active) = self.active_checkpoint.as_ref() else {
+            return Err(TrackerFault::new(
+                "ACTION_CHECKPOINT_NOT_ACTIVE",
+                "collector.action requires an active checkpoint",
+                json!({"checkpoint_id": checkpoint_id}),
+            ));
+        };
+        if active.checkpoint_id != checkpoint_id {
+            return Err(TrackerFault::new(
+                "ACTION_CHECKPOINT_MISMATCH",
+                "collector.action checkpoint_id does not match the active checkpoint",
+                json!({
+                    "expected_checkpoint_id": active.checkpoint_id,
+                    "actual_checkpoint_id": checkpoint_id
+                }),
+            ));
+        }
+        if !self.is_quiescent() {
+            return Err(TrackerFault::new(
+                "ACTION_PROTOCOL_NOT_QUIESCENT",
+                "collector.action requires all requests, follow-ups, and snapshots to be complete",
+                self.incomplete_details(),
+            ));
+        }
+        if active.action_marked {
+            return Err(TrackerFault::new(
+                "ACTION_ALREADY_MARKED",
+                "collector.action may occur only once in a checkpoint",
+                json!({"checkpoint_id": checkpoint_id}),
+            ));
+        }
+        self.active_checkpoint
+            .as_mut()
+            .expect("active checkpoint was validated")
+            .action_marked = true;
+        Ok(json!({
+            "record_type": "collector_action",
+            "phase": "marked",
+            "checkpoint_id": checkpoint_id
+        }))
+    }
+
+    fn mark_observation_cut_action(
+        &mut self,
+        checkpoint_id: &str,
+        request_id: &str,
+        observation_epoch: u64,
+    ) -> Result<Value, TrackerFault> {
+        let mut marker = self.mark_action(checkpoint_id)?;
+        let object = marker
+            .as_object_mut()
+            .expect("collector action marker is an object");
+        object.insert(
+            "boundary_source".into(),
+            Value::String("probe.observation.cut_response".into()),
+        );
+        object.insert("request_id".into(), Value::String(request_id.to_owned()));
+        object.insert("observation_epoch".into(), json!(observation_epoch));
+        Ok(marker)
     }
 
     fn end_checkpoint(
@@ -3226,7 +3627,9 @@ impl ProtocolTracker {
         active_source_instance_ids.sort();
         json!({
             "completed_requests": self.completed_request_ids.len(),
-            "completed_snapshots": self.completed_snapshots.len(),
+            "completed_chunk_streams": self.completed_snapshots.len(),
+            "completed_snapshot_streams": self.completed_snapshot_streams,
+            "completed_feedback_streams": self.completed_feedback_streams,
             "completed_checkpoints": self.completed_checkpoints.len(),
             "checkpoint_messages": self
                 .checkpoint_history
@@ -3912,6 +4315,17 @@ fn duration_ms(duration: Duration) -> u64 {
     duration.as_millis().try_into().unwrap_or(u64::MAX)
 }
 
+fn observation_cut_response_epoch(message: &Value) -> Option<u64> {
+    let result = message.get("result")?.as_object()?;
+    if result.len() != 1 {
+        return None;
+    }
+    result
+        .get("observation_epoch")?
+        .as_u64()
+        .filter(|epoch| (1..=MAX_OBSERVATION_EPOCH).contains(epoch))
+}
+
 #[derive(Default)]
 struct DrainReport {
     completed: bool,
@@ -4143,26 +4557,63 @@ fn collect_incoming(
                             first_seen,
                         );
                         let checkpoint = tracker.checkpoint_context(received_at_monotonic);
-                        faults.extend(match kind {
-                            MessageKind::Response | MessageKind::Error => tracker
-                                .observe_reply_message(
+                        let mut automatic_action_marker = None;
+                        match kind {
+                            MessageKind::Response | MessageKind::Error => {
+                                let request_id = envelope
+                                    .message
+                                    .get("id")
+                                    .and_then(Value::as_str)
+                                    .expect("validated response or error has an id");
+                                let is_observation_cut = kind == MessageKind::Response
+                                    && tracker.request_method(request_id)
+                                        == Some("probe.observation.cut");
+                                let observation_epoch = is_observation_cut
+                                    .then(|| observation_cut_response_epoch(&envelope.message))
+                                    .flatten();
+                                let reply_faults = tracker.observe_reply_message(
                                     &envelope.source_instance_id,
-                                    envelope
-                                        .message
-                                        .get("id")
-                                        .and_then(Value::as_str)
-                                        .expect("validated response or error has an id"),
+                                    request_id,
                                     kind,
                                     &envelope.message,
                                     checkpoint.checkpoint_id.as_deref(),
-                                ),
+                                );
+                                let can_mark_cut_action = is_observation_cut
+                                    && observation_epoch.is_some()
+                                    && faults.is_empty()
+                                    && reply_faults.is_empty()
+                                    && !checkpoint.orphan
+                                    && !checkpoint.checkpoint_quiet_period_violated
+                                    && !integrity_failed.load(Ordering::Acquire);
+                                faults.extend(reply_faults);
+                                if is_observation_cut && observation_epoch.is_none() {
+                                    faults.push(TrackerFault::new(
+                                        "OBSERVATION_CUT_RESPONSE_INVALID",
+                                        "a successful observation cut response must contain only a bounded observation_epoch",
+                                        json!({"request_id": request_id}),
+                                    ));
+                                } else if can_mark_cut_action {
+                                    match tracker.mark_observation_cut_action(
+                                        checkpoint
+                                            .checkpoint_id
+                                            .as_deref()
+                                            .expect("non-orphan cut response has a checkpoint"),
+                                        request_id,
+                                        observation_epoch
+                                            .expect("validated observation cut epoch exists"),
+                                    ) {
+                                        Ok(marker) => automatic_action_marker = Some(marker),
+                                        Err(fault) => faults.push(fault),
+                                    }
+                                }
+                            }
                             MessageKind::Event => {
                                 let event_name = envelope
                                     .message
                                     .get("event")
                                     .and_then(Value::as_str)
                                     .expect("validated event has a name");
-                                if matches!(
+                                let event_faults = if matches!(
                                     event_name,
                                     "probe.bank.chunk" | "probe.direct_access.chunk"
                                 ) {
@@ -4177,9 +4628,10 @@ fn collect_incoming(
                                     )
                                 } else {
                                     Vec::new()
-                                }
+                                };
+                                faults.extend(event_faults);
                             }
-                        });
+                        }
                         if checkpoint.orphan {
                             faults.push(TrackerFault::new(
                                 "ORPHAN_PROBE_MESSAGE",
@@ -4208,7 +4660,7 @@ fn collect_incoming(
                         report.diagnostics = report.diagnostics.saturating_add(
                             emit_tracker_faults(faults, &sink, &integrity_failed, "fatal"),
                         );
-                        let _ = sink.emit(&json!({
+                        let probe_record = json!({
                             "record_type": kind.record_type(),
                             "received_at_unix_ms": received_at_unix_ms,
                             "received_at_monotonic_timestamp_ms": sink
@@ -4226,7 +4678,15 @@ fn collect_incoming(
                             "processed_after_checkpoint_end": checkpoint.processed_after_checkpoint_end,
                             "checkpoint_quiet_period_violated": checkpoint.checkpoint_quiet_period_violated,
                             "message": envelope.message
-                        }));
+                        });
+                        let evidence_result = if let Some(marker) = automatic_action_marker {
+                            sink.emit_pair(&probe_record, &marker)
+                        } else {
+                            sink.emit(&probe_record)
+                        };
+                        if evidence_result.is_err() {
+                            integrity_failed.store(true, Ordering::Release);
+                        }
                         drop(tracker);
                         runtime.notify();
                     }
@@ -4370,6 +4830,8 @@ struct JsonlSink {
     failed: AtomicBool,
     run_id: String,
     started_at: Instant,
+    #[cfg(test)]
+    record_prepare_hook: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl JsonlSink {
@@ -4379,10 +4841,28 @@ impl JsonlSink {
             failed: AtomicBool::new(false),
             run_id,
             started_at,
+            #[cfg(test)]
+            record_prepare_hook: None,
         }
     }
 
     fn emit(&self, value: &Value) -> io::Result<()> {
+        let mut writer = self.lock_writer()?;
+        let record = self.prepare_record(value)?;
+        self.write_records_locked(&mut **writer, std::slice::from_ref(&record))
+    }
+
+    fn emit_pair(&self, first: &Value, second: &Value) -> io::Result<()> {
+        let mut writer = self.lock_writer()?;
+        let records = [self.prepare_record(first)?, self.prepare_record(second)?];
+        self.write_records_locked(&mut **writer, &records)
+    }
+
+    fn prepare_record(&self, value: &Value) -> io::Result<Value> {
+        #[cfg(test)]
+        if let Some(hook) = &self.record_prepare_hook {
+            hook();
+        }
         let mut record = value.clone();
         let object = record
             .as_object_mut()
@@ -4394,16 +4874,29 @@ impl JsonlSink {
             "monotonic_timestamp_ms".into(),
             json!(self.monotonic_timestamp_ms()),
         );
+        Ok(record)
+    }
 
-        let mut writer = self.writer.lock().map_err(|_| {
+    fn lock_writer(&self) -> io::Result<MutexGuard<'_, Box<dyn Write + Send>>> {
+        self.writer.lock().map_err(|_| {
             self.failed.store(true, Ordering::Release);
             io::Error::other("JSONL output lock was poisoned")
-        })?;
-        if let Err(error) = serde_json::to_writer(&mut *writer, &record)
-            .map_err(|error| io::Error::other(format!("could not encode JSONL record: {error}")))
-            .and_then(|()| writer.write_all(b"\n"))
-            .and_then(|()| writer.flush())
-        {
+        })
+    }
+
+    fn write_records_locked(
+        &self,
+        writer: &mut (dyn Write + Send),
+        records: &[Value],
+    ) -> io::Result<()> {
+        let result = records.iter().try_for_each(|record| {
+            serde_json::to_writer(&mut *writer, record)
+                .map_err(|error| {
+                    io::Error::other(format!("could not encode JSONL record: {error}"))
+                })
+                .and_then(|()| writer.write_all(b"\n"))
+        });
+        if let Err(error) = result.and_then(|()| writer.flush()) {
             self.failed.store(true, Ordering::Release);
             return Err(error);
         }
@@ -4460,7 +4953,8 @@ fn new_session_id() -> String {
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
-    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::{Arc, Barrier, TryLockError, Weak};
 
     use super::*;
 
@@ -4475,6 +4969,14 @@ mod tests {
 
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
+        }
+    }
+
+    struct FailingReader;
+
+    impl Read for FailingReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("deterministic read failure"))
         }
     }
 
@@ -4919,6 +5421,7 @@ mod tests {
             failed: AtomicBool::new(false),
             run_id: "integration".into(),
             started_at: base,
+            record_prepare_hook: None,
         });
         let collector_runtime = Arc::clone(&runtime);
         let collector_progress = Arc::clone(&progress);
@@ -5107,13 +5610,18 @@ mod tests {
             8,
         );
         assert_eq!(reset.message.params, json!({}));
+        let selected = parsed_probe(
+            br#"{"target_instance_id":"@selected","method":"probe.bank.reset"}"#,
+            9,
+        );
+        assert_eq!(
+            selected.target_instance_id.as_deref(),
+            Some(SELECTED_TARGET_ALIAS)
+        );
 
         assert!(
-            parse_command(br#"{"method":"probe.bank.next","params":{}}"#, "session", 9).is_err()
-        );
-        assert!(
             parse_command(
-                br#"{"target_instance_id":"track-probe-1","method":"probe.discover"}"#,
+                br#"{"method":"probe.bank.next","params":{}}"#,
                 "session",
                 10
             )
@@ -5121,11 +5629,277 @@ mod tests {
         );
         assert!(
             parse_command(
-                br#"{"id":"caller-id","method":"probe.discover"}"#,
+                br#"{"target_instance_id":"track-probe-1","method":"probe.discover"}"#,
                 "session",
                 11
             )
             .is_err()
+        );
+        assert!(
+            parse_command(
+                br#"{"id":"caller-id","method":"probe.discover"}"#,
+                "session",
+                12
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn streaming_sha256_matches_lowercase_standard_vectors() {
+        assert_eq!(
+            sha256_reader(Cursor::new([])).unwrap(),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        let digest = sha256_reader(Cursor::new(b"abc")).unwrap();
+        assert_eq!(
+            digest,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(digest.len(), 64);
+        assert!(
+            digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+    }
+
+    #[test]
+    fn streaming_sha256_propagates_reader_failure() {
+        assert_eq!(
+            sha256_reader(FailingReader).unwrap_err().to_string(),
+            "deterministic read failure"
+        );
+    }
+
+    #[test]
+    fn selected_target_alias_resolves_only_after_exactly_one_discovery() {
+        let base = Instant::now();
+        let mut tracker = ProtocolTracker::default();
+        make_source_ready(&mut tracker, "source-a");
+        begin_test_checkpoint(&mut tracker, base);
+        let mut selected = request(
+            "selected",
+            Some(SELECTED_TARGET_ALIAS),
+            "probe.capabilities.get",
+            json!({}),
+        );
+
+        assert_eq!(
+            tracker
+                .register_request(&selected, base, Duration::from_secs(1))
+                .unwrap_err()
+                .code,
+            "DISCOVERY_REQUIRED"
+        );
+
+        tracker
+            .source_lifecycle
+            .insert("source-b".into(), SourceLifecycle::Ready);
+        assert_eq!(
+            tracker
+                .register_request(&selected, base, Duration::from_secs(1))
+                .unwrap_err()
+                .code,
+            "DISCOVERY_REQUIRED"
+        );
+        tracker.source_lifecycle.remove("source-b");
+
+        select_source(&mut tracker, "source-a", base);
+        tracker
+            .register_request(&selected, base, Duration::from_secs(1))
+            .unwrap();
+        tracker
+            .resolve_selected_target_alias_before_send(&mut selected)
+            .unwrap();
+        assert_eq!(selected.target_instance_id.as_deref(), Some("source-a"));
+
+        let frame = encode_request_sysex(&selected).unwrap();
+        let encoded = decode_json_value(&frame).unwrap();
+        assert_eq!(encoded["target_instance_id"], "source-a");
+        assert!(
+            !serde_json::to_string(&encoded)
+                .unwrap()
+                .contains(SELECTED_TARGET_ALIAS)
+        );
+    }
+
+    #[test]
+    fn observation_cut_uses_selected_target_and_completes_without_chunk_followup() {
+        let base = Instant::now();
+        let mut tracker = ProtocolTracker::default();
+        make_source_ready(&mut tracker, "source-a");
+        select_source(&mut tracker, "source-a", base);
+
+        let mut cut = parsed_probe(
+            br#"{"target_instance_id":"@selected","method":"probe.observation.cut"}"#,
+            10,
+        );
+        assert_eq!(cut.message.method, "probe.observation.cut");
+        assert_eq!(cut.message.params, json!({}));
+        assert_eq!(
+            cut.target_instance_id.as_deref(),
+            Some(SELECTED_TARGET_ALIAS)
+        );
+
+        let before = tracker.summary();
+        tracker
+            .register_request(&cut, base, Duration::from_secs(1))
+            .unwrap();
+        assert!(
+            tracker
+                .pending_requests
+                .get("session-10")
+                .is_some_and(|pending| pending.followup.is_none())
+        );
+        tracker
+            .resolve_selected_target_alias_before_send(&mut cut)
+            .unwrap();
+        assert_eq!(cut.target_instance_id.as_deref(), Some("source-a"));
+        let encoded = decode_json_value(&encode_request_sysex(&cut).unwrap()).unwrap();
+        assert_eq!(encoded["message"]["method"], "probe.observation.cut");
+        assert_eq!(encoded["message"]["params"], json!({}));
+
+        assert!(
+            tracker
+                .observe_reply_message(
+                    "source-a",
+                    "session-10",
+                    MessageKind::Response,
+                    &json!({"result": {"observation_epoch": 7}}),
+                    Some("test-checkpoint"),
+                )
+                .is_empty()
+        );
+        assert!(tracker.pending_requests.is_empty());
+        assert!(tracker.expected_followups.is_empty());
+        assert!(tracker.is_quiescent());
+        assert_eq!(
+            tracker
+                .mark_observation_cut_action("test-checkpoint", "session-10", 7)
+                .unwrap(),
+            json!({
+                "record_type": "collector_action",
+                "phase": "marked",
+                "checkpoint_id": "test-checkpoint",
+                "boundary_source": "probe.observation.cut_response",
+                "request_id": "session-10",
+                "observation_epoch": 7
+            })
+        );
+        assert_eq!(
+            tracker.mark_action("test-checkpoint").unwrap_err().code,
+            "ACTION_ALREADY_MARKED"
+        );
+
+        let after = tracker.summary();
+        assert_eq!(
+            after["completed_requests"].as_u64(),
+            before["completed_requests"].as_u64().map(|count| count + 1)
+        );
+        assert_eq!(after["completed_chunk_streams"], 0);
+        assert_eq!(after["completed_snapshot_streams"], 0);
+        assert_eq!(after["completed_feedback_streams"], 0);
+    }
+
+    #[test]
+    fn observation_cut_response_epoch_is_exact_and_bounded() {
+        assert_eq!(
+            observation_cut_response_epoch(&json!({
+                "result": {"observation_epoch": 1}
+            })),
+            Some(1)
+        );
+        assert_eq!(
+            observation_cut_response_epoch(&json!({
+                "result": {"observation_epoch": MAX_OBSERVATION_EPOCH}
+            })),
+            Some(MAX_OBSERVATION_EPOCH)
+        );
+        for invalid in [
+            json!({"result": {"observation_epoch": 0}}),
+            json!({"result": {"observation_epoch": MAX_OBSERVATION_EPOCH + 1}}),
+            json!({"result": {"observation_epoch": 1, "unexpected": true}}),
+            json!({"result": {}}),
+            json!({"result": {"observation_epoch": "1"}}),
+        ] {
+            assert_eq!(observation_cut_response_epoch(&invalid), None);
+        }
+    }
+
+    #[test]
+    fn unresolved_selected_target_alias_can_never_be_encoded_for_midi() {
+        let selected = request(
+            "selected",
+            Some(SELECTED_TARGET_ALIAS),
+            "probe.capabilities.get",
+            json!({}),
+        );
+        let error = encode_request_sysex(&selected).unwrap_err();
+        assert_eq!(error.code, "UNRESOLVED_TARGET_ALIAS");
+    }
+
+    #[test]
+    fn post_send_evidence_failure_preserves_sent_count_and_invalidates_run() {
+        let mut report = CommandReport {
+            sent: 1,
+            ..CommandReport::default()
+        };
+        let integrity_failed = AtomicBool::new(false);
+        invalidate_after_selected_evidence_failure(&mut report, &integrity_failed, false);
+        assert_eq!(report.sent, 1);
+        assert!(report.input_failed);
+        assert_eq!(report.exit_reason, "stdout_error_after_midi_send");
+        assert!(integrity_failed.load(Ordering::Acquire));
+
+        let mut failed_send_report = CommandReport {
+            input_failed: true,
+            exit_reason: "midi_send_error",
+            ..CommandReport::default()
+        };
+        invalidate_after_selected_evidence_failure(
+            &mut failed_send_report,
+            &integrity_failed,
+            true,
+        );
+        assert_eq!(failed_send_report.sent, 0);
+        assert_eq!(failed_send_report.exit_reason, "midi_send_error");
+    }
+
+    #[test]
+    fn selected_target_alias_fails_closed_when_lifecycle_changes_before_send() {
+        let base = Instant::now();
+        let mut tracker = ProtocolTracker::default();
+        make_source_ready(&mut tracker, "source-a");
+        select_source(&mut tracker, "source-a", base);
+        let mut selected = request(
+            "selected",
+            Some(SELECTED_TARGET_ALIAS),
+            "probe.capabilities.get",
+            json!({}),
+        );
+        tracker
+            .register_request(&selected, base, Duration::from_secs(1))
+            .unwrap();
+        assert!(
+            tracker
+                .observe_source_message("source-a", &ready_message("source-a", false), false)
+                .is_empty()
+        );
+        assert_eq!(
+            tracker
+                .resolve_selected_target_alias_before_send(&mut selected)
+                .unwrap_err()
+                .code,
+            "TARGET_CHANGED_BEFORE_SEND"
+        );
+        assert_eq!(
+            selected.target_instance_id.as_deref(),
+            Some(SELECTED_TARGET_ALIAS)
+        );
+        assert_eq!(
+            encode_request_sysex(&selected).unwrap_err().code,
+            "UNRESOLVED_TARGET_ALIAS"
         );
     }
 
@@ -5249,6 +6023,16 @@ mod tests {
             end,
             ParsedCommand::CheckpointEnd { checkpoint_id } if checkpoint_id == "take-1"
         ));
+        let action = parse_command(
+            br#"{"method":"collector.action","params":{"checkpoint_id":"take-1"}}"#,
+            "session",
+            1,
+        )
+        .unwrap();
+        assert!(matches!(
+            action,
+            ParsedCommand::Action { checkpoint_id } if checkpoint_id == "take-1"
+        ));
         assert!(
             parse_command(
                 br#"{"target_instance_id":"probe","method":"collector.checkpoint.end","params":{"checkpoint_id":"take-1"}}"#,
@@ -5264,6 +6048,63 @@ mod tests {
                 1,
             )
             .is_err()
+        );
+        assert!(
+            parse_command(
+                br#"{"target_instance_id":"probe","method":"collector.action","params":{"checkpoint_id":"take-1"}}"#,
+                "session",
+                1,
+            )
+            .is_err()
+        );
+        assert!(
+            parse_command(
+                br#"{"method":"collector.action","params":{"checkpoint_id":"take-1","unexpected":true}}"#,
+                "session",
+                1,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn action_marker_requires_matching_quiescent_checkpoint_and_is_exactly_once() {
+        let base = Instant::now();
+        let mut tracker = ProtocolTracker::default();
+        assert_eq!(
+            tracker.mark_action("take-1").unwrap_err().code,
+            "ACTION_CHECKPOINT_NOT_ACTIVE"
+        );
+        tracker
+            .begin_checkpoint("take-1".into(), Duration::from_secs(5), base)
+            .unwrap();
+        assert_eq!(
+            tracker.mark_action("take-2").unwrap_err().code,
+            "ACTION_CHECKPOINT_MISMATCH"
+        );
+        let marker = tracker.mark_action("take-1").unwrap();
+        assert_eq!(marker["record_type"], "collector_action");
+        assert_eq!(marker["phase"], "marked");
+        assert_eq!(marker["checkpoint_id"], "take-1");
+        assert_eq!(
+            tracker.mark_action("take-1").unwrap_err().code,
+            "ACTION_ALREADY_MARKED"
+        );
+
+        let mut busy = ProtocolTracker::default();
+        make_source_ready(&mut busy, "source-a");
+        select_source(&mut busy, "source-a", base);
+        let request = request(
+            "busy-request",
+            Some("source-a"),
+            "probe.capabilities.get",
+            json!({}),
+        );
+        busy.register_request(&request, base, Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(
+            busy.mark_action("test-checkpoint").unwrap_err().code,
+            "ACTION_PROTOCOL_NOT_QUIESCENT"
         );
     }
 
@@ -5492,6 +6333,35 @@ mod tests {
             source_instance_id: "source-a".into(),
             snapshot_id: "snap-1".into()
         }));
+        assert_eq!(tracker.completed_snapshot_streams, 1);
+        assert_eq!(tracker.completed_feedback_streams, 0);
+
+        let mut feedback = chunk_data(
+            "feedback-1",
+            0,
+            1,
+            1,
+            vec![json!({"record_kind": "observation", "config_id": "MB_CORE_ALL"})],
+        );
+        let feedback = feedback.as_object_mut().unwrap();
+        feedback.insert("stream".into(), json!("mixer_bank_feedback"));
+        feedback.insert("reason".into(), json!("feedback"));
+        feedback.remove("config_id");
+        assert!(
+            tracker
+                .observe_chunk_event(
+                    "source-a",
+                    "probe.bank.chunk",
+                    &Value::Object(feedback.clone()),
+                )
+                .is_empty()
+        );
+        assert_eq!(tracker.completed_snapshot_streams, 1);
+        assert_eq!(tracker.completed_feedback_streams, 1);
+        let summary = tracker.summary();
+        assert_eq!(summary["completed_chunk_streams"], 2);
+        assert_eq!(summary["completed_snapshot_streams"], 1);
+        assert_eq!(summary["completed_feedback_streams"], 1);
     }
 
     #[test]
@@ -5746,6 +6616,7 @@ mod tests {
             failed: AtomicBool::new(false),
             run_id: "run-1".into(),
             started_at: Instant::now(),
+            record_prepare_hook: None,
         };
         let failed = AtomicBool::new(false);
         let report = graceful_drain(&runtime, Duration::from_millis(1), &sink, &failed);
@@ -6205,6 +7076,7 @@ mod tests {
             failed: AtomicBool::new(false),
             run_id: "run".into(),
             started_at: Instant::now(),
+            record_prepare_hook: None,
         });
         let failed = Arc::new(AtomicBool::new(false));
         let ingress_progress = Arc::new(IngressProgress::default());
@@ -6233,6 +7105,131 @@ mod tests {
     }
 
     #[test]
+    fn successful_cut_response_atomically_emits_and_marks_the_action_boundary() {
+        let base = Instant::now();
+        let (sender, receiver) = mpsc::sync_channel(MIDI_QUEUE_CAPACITY);
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::new(JsonlSink {
+            writer: Mutex::new(Box::new(SharedBuffer(Arc::clone(&output)))),
+            failed: AtomicBool::new(false),
+            run_id: "run".into(),
+            started_at: base,
+            record_prepare_hook: None,
+        });
+        let failed = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicU64::new(0));
+        let ingress_progress = Arc::new(IngressProgress::default());
+        let runtime = Arc::new(RuntimeTracker::new());
+        runtime
+            .state
+            .lock()
+            .unwrap()
+            .begin_checkpoint("test-checkpoint".into(), Duration::from_secs(5), base)
+            .unwrap();
+
+        let collector_sink = Arc::clone(&sink);
+        let collector_failed = Arc::clone(&failed);
+        let collector_dropped = Arc::clone(&dropped);
+        let collector_progress = Arc::clone(&ingress_progress);
+        let collector_runtime = Arc::clone(&runtime);
+        let collector = thread::spawn(move || {
+            collect_incoming(
+                receiver,
+                collector_dropped,
+                collector_failed,
+                collector_sink,
+                collector_runtime,
+                collector_progress,
+            )
+        });
+
+        for (sequence, message) in [
+            (1, loaded_message("source-a")),
+            (2, mapping_active_message("source-a")),
+            (3, ready_message("source-a", true)),
+        ] {
+            enqueue_test_incoming(
+                &sender,
+                &dropped,
+                &failed,
+                &ingress_progress,
+                incoming("source-a", sequence, message),
+                Instant::now(),
+            );
+        }
+        ingress_progress
+            .synchronize_until(&failed, Instant::now() + Duration::from_secs(1))
+            .unwrap();
+
+        {
+            let mut tracker = runtime.state.lock().unwrap();
+            select_source(&mut tracker, "source-a", base);
+            let cut = request(
+                "cut-auto",
+                Some("source-a"),
+                "probe.observation.cut",
+                json!({}),
+            );
+            tracker
+                .register_request(&cut, Instant::now(), Duration::from_secs(1))
+                .unwrap();
+            tracker.mark_request_sent("cut-auto", Instant::now(), Duration::from_secs(1));
+        }
+
+        enqueue_test_incoming(
+            &sender,
+            &dropped,
+            &failed,
+            &ingress_progress,
+            incoming(
+                "source-a",
+                4,
+                json!({
+                    "version": 1,
+                    "id": "cut-auto",
+                    "type": "response",
+                    "result": {"observation_epoch": 1}
+                }),
+            ),
+            Instant::now(),
+        );
+        drop(sender);
+
+        let report = collector.join().unwrap();
+        assert_eq!(report.diagnostics, 0);
+        assert!(!failed.load(Ordering::Acquire));
+        let output = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        let records: Vec<Value> = output
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let response_index = records
+            .iter()
+            .position(|record| {
+                record["record_type"] == "probe_response" && record["message"]["id"] == "cut-auto"
+            })
+            .unwrap();
+        let action = &records[response_index + 1];
+        assert_eq!(action["record_type"], "collector_action");
+        assert_eq!(action["checkpoint_id"], "test-checkpoint");
+        assert_eq!(action["boundary_source"], "probe.observation.cut_response");
+        assert_eq!(action["request_id"], "cut-auto");
+        assert_eq!(action["observation_epoch"], 1);
+
+        let mut tracker = runtime.state.lock().unwrap();
+        assert!(
+            tracker
+                .active_checkpoint
+                .as_ref()
+                .is_some_and(|checkpoint| checkpoint.action_marked)
+        );
+        assert_eq!(
+            tracker.mark_action("test-checkpoint").unwrap_err().code,
+            "ACTION_ALREADY_MARKED"
+        );
+    }
+
+    #[test]
     fn jsonl_sink_adds_run_and_single_clock_metadata_to_every_record() {
         let output = Arc::new(Mutex::new(Vec::new()));
         let sink = JsonlSink {
@@ -6240,21 +7237,81 @@ mod tests {
             failed: AtomicBool::new(false),
             run_id: "evidence-run".into(),
             started_at: Instant::now(),
+            record_prepare_hook: None,
         };
         sink.emit(&json!({"record_type": "test_one"})).unwrap();
-        sink.emit(&json!({"record_type": "test_two"})).unwrap();
+        sink.emit_pair(
+            &json!({"record_type": "test_two"}),
+            &json!({"record_type": "test_three"}),
+        )
+        .unwrap();
         let output = String::from_utf8(output.lock().unwrap().clone()).unwrap();
         let records: Vec<Value> = output
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        assert_eq!(records.len(), 2);
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0]["record_type"], "test_one");
+        assert_eq!(records[1]["record_type"], "test_two");
+        assert_eq!(records[2]["record_type"], "test_three");
         for record in &records {
             assert_eq!(record["record_format_version"], RECORD_FORMAT_VERSION);
             assert_eq!(record["run_id"], "evidence-run");
             assert!(record["monotonic_timestamp_ms"].is_u64());
             assert!(record["timestamp_unix_ms"].is_u64());
         }
+        assert!(
+            records[1]["monotonic_timestamp_ms"].as_u64()
+                >= records[0]["monotonic_timestamp_ms"].as_u64()
+        );
+    }
+
+    #[test]
+    fn concurrent_jsonl_emission_assigns_timestamps_under_the_writer_lock() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let prepare_calls = Arc::new(AtomicUsize::new(0));
+        let sink: Arc<JsonlSink> = Arc::new_cyclic(|weak: &Weak<JsonlSink>| {
+            let weak = weak.clone();
+            let prepare_calls = Arc::clone(&prepare_calls);
+            JsonlSink {
+                writer: Mutex::new(Box::new(SharedBuffer(Arc::clone(&output)))),
+                failed: AtomicBool::new(false),
+                run_id: "concurrent-evidence".into(),
+                started_at: Instant::now(),
+                record_prepare_hook: Some(Arc::new(move || {
+                    prepare_calls.fetch_add(1, Ordering::SeqCst);
+                    let sink = weak.upgrade().expect("test sink remains alive");
+                    assert!(matches!(
+                        sink.writer.try_lock(),
+                        Err(TryLockError::WouldBlock)
+                    ));
+                })),
+            }
+        });
+        let start = Arc::new(Barrier::new(3));
+        let workers: Vec<_> = ["first", "second"]
+            .into_iter()
+            .map(|record_type| {
+                let sink = Arc::clone(&sink);
+                let start = Arc::clone(&start);
+                thread::spawn(move || {
+                    start.wait();
+                    sink.emit(&json!({"record_type": record_type}))
+                })
+            })
+            .collect();
+        start.wait();
+        for worker in workers {
+            worker.join().unwrap().unwrap();
+        }
+
+        assert_eq!(prepare_calls.load(Ordering::SeqCst), 2);
+        let output = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        let records: Vec<Value> = output
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records.len(), 2);
         assert!(
             records[1]["monotonic_timestamp_ms"].as_u64()
                 >= records[0]["monotonic_timestamp_ms"].as_u64()
@@ -6270,6 +7327,10 @@ mod tests {
         assert!(help.contains("Ctrl-D"));
         assert!(help.contains("--run-id"));
         assert!(help.contains("collector.checkpoint.begin"));
+        assert!(help.contains("collector.action"));
+        assert!(help.contains(SELECTED_TARGET_ALIAS));
+        assert!(help.contains("after the atomic send attempt"));
+        assert!(help.contains("`sent` remains authoritative"));
     }
 
     #[test]

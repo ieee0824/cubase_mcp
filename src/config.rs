@@ -1,4 +1,5 @@
 use std::env;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::bridge::{DEFAULT_FROM_CUBASE_PORT, DEFAULT_TO_CUBASE_PORT, MIN_MIDI_TIMEOUT_MS};
@@ -17,9 +18,25 @@ pub struct Config {
     pub timeout: Duration,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackProbeInstallOptions {
+    pub midi_remote_root: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliAction {
     Run(Config),
     InstallMidiRemote,
+    InstallTrackProbe(TrackProbeInstallOptions),
+    ListMidiPorts,
+    PrintHelp,
+    PrintVersion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpecialAction {
+    InstallMidiRemote,
+    InstallTrackProbe,
     ListMidiPorts,
     PrintHelp,
     PrintVersion,
@@ -54,31 +71,98 @@ impl Config {
         mut config: Config,
     ) -> Result<CliAction, String> {
         let mut arguments = arguments.into_iter();
+        let mut special_action = None;
+        let mut run_option_seen = false;
+        let mut midi_remote_root = None;
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
                 "--bridge" => {
+                    run_option_seen = true;
                     config.bridge_mode = next_value(&mut arguments, "--bridge")?;
                 }
                 "--bridge-address" => {
+                    run_option_seen = true;
                     config.bridge_address = next_value(&mut arguments, "--bridge-address")?;
                 }
                 "--midi-input" => {
+                    run_option_seen = true;
                     config.midi_input_port = Some(next_value(&mut arguments, "--midi-input")?);
                 }
                 "--midi-output" => {
+                    run_option_seen = true;
                     config.midi_output_port = Some(next_value(&mut arguments, "--midi-output")?);
                 }
                 "--timeout-ms" => {
+                    run_option_seen = true;
                     let value = next_value(&mut arguments, "--timeout-ms")?;
                     config.timeout = Duration::from_millis(parse_timeout(&value)?);
                 }
-                "--install-midi-remote" => return Ok(CliAction::InstallMidiRemote),
-                "--list-midi-ports" => return Ok(CliAction::ListMidiPorts),
-                "-h" | "--help" => return Ok(CliAction::PrintHelp),
-                "-V" | "--version" => return Ok(CliAction::PrintVersion),
+                "--install-midi-remote" => select_special_action(
+                    &mut special_action,
+                    SpecialAction::InstallMidiRemote,
+                    &argument,
+                )?,
+                "--install-track-probe" => select_special_action(
+                    &mut special_action,
+                    SpecialAction::InstallTrackProbe,
+                    &argument,
+                )?,
+                "--midi-remote-root" => {
+                    if midi_remote_root.is_some() {
+                        return Err("--midi-remote-root must not be repeated".into());
+                    }
+                    midi_remote_root = Some(PathBuf::from(next_path_value(
+                        &mut arguments,
+                        "--midi-remote-root",
+                    )?));
+                }
+                "--list-midi-ports" => select_special_action(
+                    &mut special_action,
+                    SpecialAction::ListMidiPorts,
+                    &argument,
+                )?,
+                "-h" | "--help" => {
+                    select_special_action(&mut special_action, SpecialAction::PrintHelp, &argument)?
+                }
+                "-V" | "--version" => select_special_action(
+                    &mut special_action,
+                    SpecialAction::PrintVersion,
+                    &argument,
+                )?,
                 _ => return Err(format!("Unknown argument '{argument}'")),
             }
         }
+
+        if let Some(action) = special_action {
+            if run_option_seen {
+                return Err("Bridge options cannot be combined with a one-shot CLI action".into());
+            }
+            return match action {
+                SpecialAction::InstallTrackProbe => {
+                    Ok(CliAction::InstallTrackProbe(TrackProbeInstallOptions {
+                        midi_remote_root,
+                    }))
+                }
+                SpecialAction::InstallMidiRemote => {
+                    reject_track_probe_only_options(&midi_remote_root)?;
+                    Ok(CliAction::InstallMidiRemote)
+                }
+                SpecialAction::ListMidiPorts => {
+                    reject_track_probe_only_options(&midi_remote_root)?;
+                    Ok(CliAction::ListMidiPorts)
+                }
+                SpecialAction::PrintHelp => {
+                    reject_track_probe_only_options(&midi_remote_root)?;
+                    Ok(CliAction::PrintHelp)
+                }
+                SpecialAction::PrintVersion => {
+                    reject_track_probe_only_options(&midi_remote_root)?;
+                    Ok(CliAction::PrintVersion)
+                }
+            };
+        }
+
+        reject_track_probe_only_options(&midi_remote_root)?;
 
         if !matches!(config.bridge_mode.as_str(), "tcp" | "midi" | "mock") {
             return Err(format!(
@@ -134,6 +218,8 @@ impl Config {
            --midi-output <NAME>      Existing 'To Cubase' output port (default: virtual port)\n\
            --timeout-ms <MILLIS>     Bridge request timeout (default: 2000; MIDI minimum: 500)\n\
            --install-midi-remote     Install the bundled Cubase MIDI Remote script\n\
+           --install-track-probe     Install the read-only Track API research probe\n\
+           --midi-remote-root <DIR>  Exact existing 'Driver Scripts/Local' root for the probe\n\
            --list-midi-ports         List existing MIDI input/output ports as JSON\n\
            -h, --help                Print help\n\
            -V, --version             Print version\n\
@@ -143,6 +229,27 @@ impl Config {
            CUBASE_MCP_BRIDGE_ADDRESS\n\
            CUBASE_MCP_TIMEOUT_MS\n"
     }
+}
+
+fn select_special_action(
+    selected: &mut Option<SpecialAction>,
+    action: SpecialAction,
+    option: &str,
+) -> Result<(), String> {
+    if selected.is_some() {
+        return Err(format!(
+            "One-shot CLI actions are mutually exclusive; cannot add '{option}'"
+        ));
+    }
+    *selected = Some(action);
+    Ok(())
+}
+
+fn reject_track_probe_only_options(midi_remote_root: &Option<PathBuf>) -> Result<(), String> {
+    if midi_remote_root.is_some() {
+        return Err("--midi-remote-root requires --install-track-probe".into());
+    }
+    Ok(())
 }
 
 fn validate_midi_remote_port_names(input: &str, output: &str) -> Result<(), String> {
@@ -167,6 +274,17 @@ fn next_value(
         .next()
         .filter(|value| !value.is_empty())
         .ok_or_else(|| format!("Missing value for {option}"))
+}
+
+fn next_path_value(
+    arguments: &mut impl Iterator<Item = String>,
+    option: &str,
+) -> Result<String, String> {
+    let value = next_value(arguments, option)?;
+    if value.starts_with('-') {
+        return Err(format!("Missing value for {option}"));
+    }
+    Ok(value)
 }
 
 fn parse_timeout(value: &str) -> Result<u64, String> {
@@ -212,6 +330,101 @@ mod tests {
     }
 
     #[test]
+    fn selects_track_probe_installer() {
+        let root = PathBuf::from("/tmp/example/MIDI Remote/Driver Scripts/Local");
+        let action = Config::parse(
+            [
+                "--install-track-probe".into(),
+                "--midi-remote-root".into(),
+                root.display().to_string(),
+            ],
+            Config::defaults(),
+        )
+        .unwrap();
+        assert_eq!(
+            action,
+            CliAction::InstallTrackProbe(TrackProbeInstallOptions {
+                midi_remote_root: Some(root),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_track_probe_options_without_track_probe_action() {
+        let arguments = vec!["--midi-remote-root".into(), "/tmp/root".into()];
+        assert!(Config::parse(arguments, Config::defaults()).is_err());
+    }
+
+    #[test]
+    fn rejects_combined_actions_run_options_and_trailing_unknowns() {
+        for arguments in [
+            vec!["--install-track-probe".into(), "--list-midi-ports".into()],
+            vec![
+                "--bridge".into(),
+                "mock".into(),
+                "--install-track-probe".into(),
+            ],
+            vec![
+                "--install-track-probe".into(),
+                "--bridge".into(),
+                "mock".into(),
+            ],
+            vec!["--install-track-probe".into(), "--unknown".into()],
+        ] {
+            assert!(Config::parse(arguments, Config::defaults()).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_missing_track_probe_root_value() {
+        let error = Config::parse(
+            [
+                "--install-track-probe".into(),
+                "--midi-remote-root".into(),
+                "--list-midi-ports".into(),
+            ],
+            Config::defaults(),
+        )
+        .unwrap_err();
+        assert!(error.contains("Missing value for --midi-remote-root"));
+    }
+
+    #[test]
+    fn help_lists_strict_track_probe_installer_options() {
+        let help = Config::help();
+        assert!(help.contains("--install-track-probe"));
+        assert!(help.contains("--midi-remote-root"));
+    }
+
+    #[test]
+    fn existing_string_options_may_start_with_a_hyphen() {
+        let action = Config::parse(
+            [
+                "--bridge".into(),
+                "midi".into(),
+                "--midi-input".into(),
+                "- Cubase MCP From Cubase".into(),
+                "--midi-output".into(),
+                "- Cubase MCP To Cubase".into(),
+            ],
+            Config::defaults(),
+        )
+        .unwrap();
+
+        let CliAction::Run(config) = action else {
+            panic!("expected run action");
+        };
+        assert_eq!(
+            config.midi_input_port.as_deref(),
+            Some("- Cubase MCP From Cubase")
+        );
+        assert_eq!(
+            config.midi_output_port.as_deref(),
+            Some("- Cubase MCP To Cubase")
+        );
+    }
+
+    #[test]
     fn rejects_midi_timeout_too_short_for_discovery() {
         let error = Config::parse(
             [
@@ -222,8 +435,7 @@ mod tests {
             ],
             Config::defaults(),
         )
-        .err()
-        .expect("short MIDI timeout must be rejected");
+        .expect_err("short MIDI timeout must be rejected");
 
         assert!(error.contains(&MIN_MIDI_TIMEOUT_MS.to_string()));
     }
@@ -259,8 +471,7 @@ mod tests {
             ],
             Config::defaults(),
         )
-        .err()
-        .expect("arbitrary port names must be rejected");
+        .expect_err("arbitrary port names must be rejected");
 
         assert!(error.contains(DEFAULT_FROM_CUBASE_PORT));
     }

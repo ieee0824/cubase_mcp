@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use cubase_mcp::bridge::{CubaseBridge, MidiBridge, MockBridge, TcpBridge};
 use cubase_mcp::config::{CliAction, Config};
-use cubase_mcp::installer::install_midi_remote;
+use cubase_mcp::installer::{install_midi_remote, install_track_probe};
 use cubase_mcp::mcp::McpServer;
 use cubase_mcp::service::IntegrationService;
 
@@ -46,6 +46,24 @@ fn main() -> ExitCode {
                 }
                 Err(error) => {
                     eprintln!("could not install Cubase MIDI Remote script: {error}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        Ok(CliAction::InstallTrackProbe(options)) => {
+            return match install_track_probe(&options) {
+                Ok(report) => match serde_json::to_string_pretty(&report) {
+                    Ok(json) => {
+                        println!("{json}");
+                        ExitCode::SUCCESS
+                    }
+                    Err(error) => {
+                        eprintln!("could not encode Track Probe install report: {error}");
+                        ExitCode::FAILURE
+                    }
+                },
+                Err(error) => {
+                    eprintln!("could not install Cubase Track API probe: {error}");
                     ExitCode::FAILURE
                 }
             };

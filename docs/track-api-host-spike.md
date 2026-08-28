@@ -1,10 +1,10 @@
 # Track Host API実機スパイク結果
 
-この文書は[Issue #3](https://github.com/ieee0824/cubase_mcp/issues/3)の調査記録です。[Track API実機検証fixture](track-api-fixture.md) revision 2を使い、CubaseのMixer BankとDirectAccessでTrack列挙に必要な情報を安全かつ完全に取得できるかを比較します。ここでの観測結果を[Issue #4](https://github.com/ieee0824/cubase_mcp/issues/4)の方式・対応version決定と[Issue #5](https://github.com/ieee0824/cubase_mcp/issues/5)のDTO / ID / pagination契約へ入力します。revision 1のfixtureまたはrun artifactをrevision 2の証拠として再利用しません。
+この文書は[Issue #3](https://github.com/ieee0824/cubase_mcp/issues/3)の調査記録です。[Track API実機検証fixture](track-api-fixture.md) revision 2を使い、CubaseのMixer BankとDirectAccessでそれぞれ明示したbounded scopeのTrack情報を安全かつ欠落なく取得できるかを比較します。DirectAccessの観測scopeは完全なhost graphではなく、`mix_console_root_children_v1`で固定したbase objectとその直下childだけです。ここでの観測結果を[Issue #4](https://github.com/ieee0824/cubase_mcp/issues/4)の方式・対応version決定と[Issue #5](https://github.com/ieee0824/cubase_mcp/issues/5)のDTO / ID / pagination契約へ入力します。revision 1のfixtureまたはrun artifactをrevision 2の証拠として再利用しません。
 
 文書状態: `PENDING_RUNTIME`
 
-このrevisionではread-onlyの静的preflightと、実機観測用Probe / collector / fail-closed auditorのoffline実装だけが完了しています。Cubaseを使うruntime runはまだ実施していません。したがって、観測欄の`PENDING`は成功、対応、非対応のいずれも意味しません。runtime表、比較、最終推奨、完了checklistが埋まるまでIssue #3をcloseしません。
+このrevisionではread-onlyの静的preflightと、実機観測用Probe / collector / fail-closed auditorのoffline実装が完了しています。2026-08-28のCubase 15 formal attemptはE1で旧full-graph traversalがrepeat edgeを`cycle_detected` / `truncated`として停止したためinvalidであり、runtime結果へ採用しません。この失敗を新しいroot-child projectionで遡及的に成功へ変更せず、fresh collector、fresh run ID、修正版Probeで再実施します。したがって、観測欄の`PENDING`は成功、対応、非対応のいずれも意味しません。runtime表、比較、最終推奨、完了checklistが埋まるまでIssue #3をcloseしません。
 
 ## 結果class
 
@@ -66,7 +66,7 @@ Cubase edition、runtimeが実際にloadしたAPI、run日時、About画面の�
 | Mixer Bank API | 存在 | `PENDING` | v1.1と同じcallback・終端挙動を保証しない |
 | MixerBankChannel / SelectedTrackChannelのunique ID getter | 存在 | `PENDING` | rename、project切替、reload、restartをまたぐ寿命を保証しない |
 | DirectAccess activate / update / deactivate | 存在 | `PENDING` | lifecycle中のready条件を保証しない |
-| base object、child count、child object IDによるgraph走査 | 存在 | `PENDING` | Project Track全体をunique nodeとrepeat edgeへ分離して欠落なく返すことを保証しない |
+| base object、child count、child object IDによるroot-child取得 | 存在 | `PENDING` | base object直下より深いhost graph、Project Track全体、Folderを欠落なく返すことを保証しない |
 | object unique name getter | 存在 | `NOT_INVOKED_PRIVACY` | ambient host文字列をraw化しないためruntime値・例外・寿命は意図的に未観測 |
 | object unique ID / title | 存在 | `PENDING_FIXTURE_SCOPE` | allowlist済みfixture node以外のraw値は収集せず、各値の必須性、長さ、寿命を一般化しない |
 | mixer visibility / index / zone | 存在 | `PENDING` | Project順やhidden Trackのinclusionを保証しない |
@@ -124,7 +124,7 @@ Probe / collectorのrepository内artifactとoffline commandは次で固定しま
 | collector binary SHA-256 | run開始時に実行するrelease binaryから取得 | `PENDING_RUNTIME` |
 | repository commit | run開始時の40桁commit SHA | `PENDING_RUNTIME` |
 
-Track Probeはcollectorへ渡す前にsource-side data minimizationを行います。revision 2の固定fixture allowlistへ一致するtitleと、それに属するopaque host IDだけをraw frameへ許可し、それ以外のbank / DirectAccess nodeはtitleとhost IDを`null`へして明示的redaction flag / 件数だけを送ります。P09は固定80文字のprefixかつ予約marker `CMCP_09_LONG_`全体を含む場合だけfixture扱いします。DirectAccessのobject unique name getterはambient文字列を取得しないよう意図的に呼び出さず、fixed allowlist外のtype名とhost exception textも送信前にredactまたは固定code化します。unique nodeのspanning-tree位置、再訪辺、親子関係、安全なboolean / numeric metadataはscope差を観測するため保持します。runtime capabilityの固定`data_minimization`契約とartifact digestが一致しないrunを開始しません。
+Track Probeはcollectorへ渡す前にsource-side data minimizationを行います。revision 2の固定fixture allowlistへ一致するtitleと、それに属するopaque host IDだけをraw frameへ許可し、それ以外のbank / DirectAccess nodeはtitleとhost IDを`null`へして明示的redaction flag / 件数だけを送ります。P09は固定80文字のprefixかつ予約marker `CMCP_09_LONG_`全体を含む場合だけfixture扱いします。DirectAccessのobject unique name getterはambient文字列を取得しないよう意図的に呼び出さず、fixed allowlist外のtype名とhost exception textも送信前にredactまたは固定code化します。`mix_console_root_children_v1`内のroot-child位置、再訪辺、安全なboolean / numeric metadataはscope差を観測するため保持します。depth-1 observationではchild countをbounded metadataとして取得しますが、そのchild object ID getterは呼びません。runtime capabilityの固定`data_minimization`契約とartifact digestが一致しないrunを開始しません。
 
 offline validationはrepository rootで次をすべて実行します。
 
@@ -191,7 +191,7 @@ checkpoint_id
 message.type
 message.event / message.id
 message.data
-bank config / slot index または DirectAccess graph位置・再訪辺
+bank config / slot index または DirectAccess root-child位置・再訪辺
 host_id_raw                # local raw JSONLのみ
 host_id_byte_length
 returned title / type / selected / mute / solo / visibility
@@ -258,13 +258,17 @@ targeted requestは、同じrequest IDに対する同じ`source_instance_id`か�
 
 `probe.bank.chunk` / `probe.direct_access.chunk`は`source_instance_id + snapshot_id`単位で、chunk count、0始まりの連続index、total item数、complete flagを検査します。fragment化されたhost IDもreference、fragment count / index、UTF-8 byte lengthを検査します。欠落、重複、逆順、不整合、未完snapshot / fragment / requestを残したEOFはrun fatalです。collectorはEOF後も設定されたdrain期限まで受信を続け、quiescentにならないrunを成功にしません。
 
-DirectAccess snapshotは単純なtreeではなく、**unique-node spanning tree + explicit repeat-edge records**として表現します。初回観測したobjectだけを`record_kind = "observation"`としてexactly once出力し、既観測objectへ戻る辺も捨てず、`record_kind = "object_reference"`として記録します。referenceのexact fieldは`record_kind`、`observation_epoch`、`observation_epoch_status`、targetの`object_id`、sourceの`parent_id`、`child_index`、出現`depth`、`target_observation_index`、`reference_kind`です。`target_observation_index`はwire item indexではなく、targetを最初に出力した0始まりのobservation ordinalで、必ずreferenceより前に存在し、そのobservationの`object_id`と一致させます。targetがsource自身を含むactive ancestor chainにある辺は`ancestor_cycle`、chain外の既観測targetは`shared_reference`です。reference itemにはtitle、unique name、opaque host ID、自由形式type / error文字列を含めません。
+DirectAccess snapshotのcontractは`projection = "mix_console_root_children_v1"`です。これはbase objectをroot observationとして1件取得し、そのrootが宣言した直下child indexだけを0から昇順に1回ずつ取得する**depth-1 projection**です。root childのchild listは展開せず、完全なhost graph走査として扱いません。capabilityのDirectAccess欄は同じ`projection`、`scope_depth = 1`、`authoritative_for_track_enumeration = false`を返し、traversal limitは`direct_access_nodes = 256`、`direct_access_depth = 1`、`direct_access_children = 128`でなければなりません。`direct_access_nodes`はfail-closedな共通semantic-record ceilingであり、このprojectionの形状上の有効な最大件数は後述の129です。この固定値とsnapshot metadataが一致しないrunは開始または監査を続行しません。
 
-`observation_items == observation record数`、`reference_items == object_reference record数 == cycle_count + shared_reference_count`、`cycle_count == ancestor_cycle record数`、`shared_reference_count == shared_reference record数`を必須にします。`total_items == observation_items + reference_items + host_id_fragment record数`で、host-ID fragmentだけがsemantic itemとは別のwire itemです。nontruncated snapshotはsemantic recordが最大256件、depthが最大32、各objectのchild countが最大128で、depth 32のobjectはleafでなければなりません。expectedなcycle / shared referenceを全辺記録できたsnapshotは`truncated = false`かつ`truncation_reasons = []`であり、`snapshot_complete`はchunk転送の完了、graph completenessは別々に検証します。
+各snapshot chunkは`projection`に加えて`scope_depth = 1`、`scope_complete`、`host_graph_complete`、`root_child_count`、`authoritative_for_track_enumeration`を同一値で持ちます。valid snapshotでは`scope_complete = true`、`host_graph_complete = false`、`authoritative_for_track_enumeration = false`です。`scope_complete`はrootと宣言された全root-child coordinateと、そのobservationに必要なbounded metadataを取得した意味に限り、depth 1より下のhost graphやProject Track全体の完全性を意味しません。root observationだけが`parent_id = null / depth = 0 / child_index = null / children_expanded = true`で、root-child observationは`parent_id = base_object_id / depth = 1 / children_expanded = false`です。depth-1 observationの`child_count`は子孫数のbounded metadataとして保持しますが、child object IDを列挙していないため、`children_expanded = false`をleafやdescendant completenessの証拠へ読み替えません。
 
-auditorは`base_object_id`と一致するroot observationがexactly 1件で、rootだけが`parent_id = null / depth = 0 / child_index = null`であることを確認します。host-ID fragmentを除くsemantic record列は、rootからchild index昇順に進むpreorder depth-first traversalとexactly一致させます。全non-root observationは先に存在する既知parentを持ち、`depth = parent.depth + 1`かつchild indexがparentの宣言範囲内でなければなりません。referenceもsource / targetが既知で、`target_observation_index < observation_items`、対応ordinalのtarget ID一致、referenceより先の初回観測を必須にします。observation辺とreference辺を合わせた`(parent_id, child_index)`は全体で一意で、各parentのchild index集合が`0..child_count-1`を完全に覆い、ancestor / shared分類もその時点のactive DFS ancestor stackと一致することを検証します。dangling edge、forward parent / target、preorder違反、duplicate coordinate、分類・count不一致、欠落child indexはfatalです。
+初回観測したroot-child objectだけを`record_kind = "observation"`として出力します。同じroot child IDが後のindexに再出現した場合やchild IDがroot自身だった場合も辺を捨てず、`record_kind = "object_reference"`としてそのroot-child coordinateを保持します。referenceのexact fieldは`record_kind`、`observation_epoch`、`observation_epoch_status`、targetの`object_id`、source rootの`parent_id`、`child_index`、`depth = 1`、`target_observation_index`、`reference_kind`です。root自身を指す辺だけが`ancestor_cycle`、先行する別root-child observationを指す重複辺は`shared_reference`です。`target_observation_index`はwire item indexではなく0始まりのobservation ordinalで、必ずreferenceより前のobservationに一致させます。reference itemには`children_expanded`、title、unique name、opaque host ID、自由形式type / error文字列を含めません。
 
-base / child enumeration getterの失敗、invalid child ID、depth・child・semantic-record上限等で新しいnodeまたは辺を取得できなかった場合だけ`truncated = true`にします。既知nodeのbounded metadata getter failureは`metadata_error_count`と固定codeで別に表し、それだけでgraph truncationへ変換しません。`cycle_count`だけを見てtruncationを許可したり、旧snapshotで欠落したrepeat edgeを後から推測して補ったりしません。`truncated = true`は理由を問わず従来どおりrun fatalで、修正版Probeとfresh collector / run IDによる再実施が必要です。
+`root_child_count`は0以上128以下で、host-ID fragmentを除くsemantic recordは常にroot 1件とroot child coordinateごとのobservationまたはreference 1件、すなわち`observation_items + reference_items == root_child_count + 1 <= 129`です。`reference_items == cycle_count + shared_reference_count`、`cycle_count == ancestor_cycle record数`、`shared_reference_count == shared_reference record数`、`total_items == observation_items + reference_items + host_id_fragment record数`も必須です。host-ID fragmentはsemantic itemではなく、reference itemへhost-ID fieldを追加しません。
+
+auditorは`base_object_id`と一致するroot observationがexactly 1件であること、semantic record列がrootの後にchild index昇順でexactly `0..root_child_count-1`を覆うこと、各coordinateがobservationまたはreferenceのどちらか1件だけであることを確認します。root-child observationのIDは初出、referenceのsourceはroot、targetは先行observation、target ordinalとobject IDは一致しなければなりません。root self-reference / duplicate childの分類、全count式、`children_expanded`、scope metadataの固定値も検証します。欠落・重複・逆順coordinate、forward target、depth 1以外、未知projection、`scope_complete != true`、`host_graph_complete != false`、`authoritative_for_track_enumeration != false`はfatalです。
+
+base / root-child enumeration getterの失敗、invalid child ID、root child count 129以上、semantic-record上限、またはobservationに必須のchild-count取得失敗等でroot-child projection contractを満たせなかった場合は`truncated = true`かつ`scope_complete = false`にします。それ以外のbounded metadata getter failureは`metadata_error_count`と固定codeで別に表し、それだけでscope truncationへ変換しません。depth-1 observationのchild object IDを意図的に取得しないことはtruncationではなく`children_expanded = false` / `host_graph_complete = false`で表します。旧full-graph runのrepeat edge欠落をこの新contractで補完または再解釈せず、`truncated = true`は理由を問わず従来どおりrun fatalです。
 
 `probe.overflow`はsource queue、outbound frame、host-ID fragment上限、snapshot queue、deactivation時の未drain feedbackまたは必須work破棄を含め、理由を問わずrun fatalです。唯一、same-script reactivationまたはrun内restart境界で、旧mappingのcallbackを全件送信済みかつ次の`page_activate` snapshotに置換されるcoalescedな非command DirectAccess change snapshotのcancelは未送信証拠の破棄として扱いません。明示command snapshot、`page_activate`、bank snapshot、未知reasonはこの例外へ含めません。raw logの`collector_summary`が`integrity_ok: true`かつ`exit_ok: true`でないrunを`OBSERVED`へ使いません。
 
@@ -467,13 +471,13 @@ O1を将来実装するときは、別途明示的な許可、専用Probe build�
 
 ## Cubase 13.0.30 conditional DirectAccess projection
 
-INIT capabilityがDirectAccessを`supported: false, active: false`と報告し、固定のunavailable / incomplete reasonと整合した場合だけ、この節を`UNSUPPORTED_RUNTIME`として固定し、DA snapshotやeventを捏造しません。supported / activeだった場合は同じC13 physical runの全44 checkpointから作るprojectionをここへ記録し、後続のC15詳細表と同じlifecycle、graph topology、metadata、change callback項目を評価します。supportedだがinactive、activation error、または組合せ不整合はこの表へ`UNSUPPORTED`として記録せずrunを停止します。
+INIT capabilityがDirectAccessを`supported: false, active: false`と報告し、固定のunavailable / incomplete reasonと整合した場合だけ、この節を`UNSUPPORTED_RUNTIME`として固定し、DA snapshotやeventを捏造しません。supported / activeだった場合は同じC13 physical runの全44 checkpointから作る`mix_console_root_children_v1` projectionをここへ記録し、後続のC15詳細表と同じlifecycle、root-child scope、metadata、change callback項目を評価します。supportedだがinactive、activation error、または組合せ不整合はこの表へ`UNSUPPORTED`として記録せずrunを停止します。
 
 | 項目 | 観測値 | result |
 | --- | --- | --- |
 | runtime capability summary | `PENDING` | `PENDING_CONDITIONAL` |
 | activation初期snapshot / ready順 | `PENDING` | `PENDING_CONDITIONAL` |
-| E0 / E1 / E8 / C1 graph scope、spanning-tree順、repeat edge | `PENDING` | `PENDING_CONDITIONAL` |
+| E0 / E1 / E8 / C1 root-child scope、child index順、repeat edge | `PENDING` | `PENDING_CONDITIONAL` |
 | unique ID / title / type等metadata | `PENDING` | `PENDING_CONDITIONAL` |
 | rename / add / delete / visibility / state callback | `PENDING` | `PENDING_CONDITIONAL` |
 | reload / restart後の回復とID寿命 | `PENDING` | `PENDING_CONDITIONAL` |
@@ -483,7 +487,7 @@ INIT capabilityがDirectAccessを`supported: false, active: false`と報告し�
 
 この節は同じC15-COMBINED physical runのDirectAccess projectionです。
 
-### Lifecycleとgraph topology
+### Lifecycleとroot-child projection
 
 | 項目 | 観測値 | result |
 | --- | --- | --- |
@@ -491,14 +495,17 @@ INIT capabilityがDirectAccessを`supported: false, active: false`と報告し�
 | activate → base object取得順 | `PENDING` | `PENDING` |
 | update / object change callback順 | `PENDING` | `PENDING` |
 | deactivate後のcallback有無 | `PENDING` | `PENDING` |
+| `projection = mix_console_root_children_v1` / `scope_depth = 1` | `PENDING` | `PENDING` |
+| `scope_complete = true` / `host_graph_complete = false` / non-authoritative | `PENDING` | `PENDING` |
 | E0 root / child count | `PENDING` | `PENDING` |
 | E1 root / child count /順序 | `PENDING` | `PENDING` |
 | E8 root / child count /順序 | `PENDING` | `PENDING` |
-| C1 graphのscope、深さ、spanning-tree順序 | `PENDING` | `PENDING` |
-| Folder / hidden / Group / FX inclusion | `PENDING` | `PENDING` |
+| C1 root-child scopeとchild index順序 | `PENDING` | `PENDING` |
+| root / root childの`children_expanded` | `PENDING` | `PENDING` |
+| Folder / hidden / Group / FX inclusion（root-child観測範囲のみ） | `PENDING` | `PENDING` |
 | Input / Output / VCA inclusion | `PENDING` | `PENDING` |
-| duplicate observation / ancestor cycle / shared reference / invalid child ID | `PENDING` | `PENDING` |
-| graph走査の収束時間 | `PENDING` | `PENDING` |
+| root self-reference / shared child reference / invalid child ID | `PENDING` | `PENDING` |
+| root-child projectionの収束時間 | `PENDING` | `PENDING` |
 
 ### Metadata
 
@@ -516,7 +523,7 @@ INIT capabilityがDirectAccessを`supported: false, active: false`と報告し�
 
 ### Change callback
 
-| 操作 | object change | will-be-removed | graph / metadata再取得 | seq integrity | result |
+| 操作 | object change | will-be-removed | root-child / metadata再取得 | seq integrity | result |
 | --- | --- | --- | --- | --- | --- |
 | rename | `PENDING` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
 | add | `PENDING` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
@@ -538,7 +545,7 @@ INIT capabilityがDirectAccessを`supported: false, active: false`と報告し�
 | S2-add | add、自動selection、後続index | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
 | S3-select-delete | P11単独selection | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
 | S3-delete | removal、自動selection、後続index | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
-| S4-show | hidden P08をshow、bank / graph差分 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| S4-show | hidden P08をshow、bank / root-child差分 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
 | S5-select-anchor | P12比較元selection | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
 | S5-select-change | P12 false / P13 trueの順 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
 | S6-mute | P04 muteと意図しないselection | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
@@ -576,6 +583,7 @@ R1 / R2のreconnect deadlineはaction markerからreadyと再discover完了ま�
 | delayed / out-of-order callback耐性 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
 | mutation中snapshotの失効検出 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
 | hidden / zone / I/O scopeの明確さ | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| Project Track全体 / Folderの完全列挙authority | `PENDING` | `false`（root-child scope固定） | `PENDING` | `false`（root-child scope固定） |
 | reload / restart後の回復 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
 | API feature detectionによる安全なfallback | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
 
@@ -583,21 +591,22 @@ R1 / R2のreconnect deadlineはaction markerからreadyと再discover完了ま�
 
 最終推奨: `PENDING`
 
-Issue #4へ方式を提案するには、候補が次のgateをすべて満たす必要があります。
+Issue #4へ方式を提案するには、候補が公開しようとするscopeについて次のgateをすべて満たす必要があります。DirectAccessの`mix_console_root_children_v1`は`authoritative_for_track_enumeration = false`なので、それ単独をProject全体の`tracks.list`候補としてgate通過させません。Mixer Bankもprimary Probeが明示的にfilterしたcore MixConsole channelだけが候補scopeであり、Project windowのFolderを含む全Track authorityは別の証拠がない限り主張しません。
 
 1. **観測integrity**: callback windowとsequence検査を通過し、drop、duplicate、逆順、orphanがない。
-2. **bounded completeness**: E0、E1、E8のbank幅ちょうど、C1のbank幅超過と最終partial pageで、有限回の操作から重複・欠落なく終端を判定できる。
+2. **bounded completeness**: Mixer BankではE0、E1、E8のbank幅ちょうど、C1のbank幅超過と最終partial pageについて有限回の操作からcore MixConsole channelの終端を重複・欠落なく判定できる。DirectAccessではrootと宣言された全root childだけを重複・欠落なく取得できる。どちらも未観測surfaceへ完全性を拡張しない。
 3. **opaque identity**: 同名Trackを区別でき、name、index、type、routingからIDを合成しない。ID寿命をsession / rename / project / reload / restart単位で明記できる。
 4. **truthful metadata**: titleとstateの初期値到着前をreadyにせず、取得不能なtypeやstateを推測しない。
 5. **snapshot consistency**: add / rename / delete / visibility / state変更中に異なる時点のTrackを正常な単一snapshotへ混ぜない。変更検知またはgeneration失効を実装できる。
-6. **scope determinism**: Project、MixConsole、visibility、window zone、Input / Output / VCAの包含規則を明示できる。
+6. **scope determinism**: Project、MixConsole、visibility、window zone、Input / Output / VCAの包含規則と、Project Folder completenessが未証明である境界を明示できる。
 7. **lifecycle safety**: activate / deactivate / reload / restartでpending stateを破棄でき、unsupported hostでも既存Transport 6 Toolを壊さない。
 8. **version evidence**: 正確なruntime hostで確認した能力だけを対応表へ載せる。Cubase 15 / API v1.3のtype結果をAPI v1.2へ一般化しない。
 
 判定時は次のfail-closed規則を適用します。
 
 - API v1.1 Mixer Bankで完全な終端またはopaque IDを保証できなければ、そのhostで`tracks.list`を成功扱いせずCapabilityを`false`とする案を選ぶ。
-- DirectAccessがgateを満たす場合も、feature detectionとlifecycle guardを必須にする。
+- DirectAccessがroot-child scopeのgateを満たす場合もfeature detectionとlifecycle guardを必須にし、`scope_complete = true`をhost graphまたはProject Track全体のcompleteへ読み替えない。
+- Mixer Bankでcore MixConsole channelを完全に取得できても、Folderを含むProject Track全体の列挙成功へ読み替えない。Project-wide APIを提供するには別surfaceによるFolder completenessの証拠か、公開scopeをcore MixConsole channelへ限定する明示契約が必要である。
 - API v1.2の最低対応versionを主張するには、v1.2公式契約だけで十分な項目と、正確なv1.2 runtime runを必要とする項目を分離する。現在13.0.50 runtimeは`NOT_AVAILABLE`である。
 - どの候補も完全性を証明できなければ、推測によるfallbackを追加せず`tracks.list`を未対応のままにする。
 
@@ -611,8 +620,9 @@ Issue #4へ方式を提案するには、候補が次のgateをすべて満た�
 - [ ] redacted reportがraw run IDの`run-<16-hex>` alias、raw / manifest digest、allowlist済みsemantic projection、run-local ID aliasを含み、raw run ID / raw host ID / path / port / unknown titleを含まない
 - [ ] 同名、Unicode、長い名前、hidden、Folder、複数type、bank幅超過をUI ground truthと比較した
 - [ ] add / rename / delete / selection / mute / solo / visibility / project切替を個別windowで観測した
-- [ ] ID寿命、callback順、空slot、bank終端、graph scope / repeat edgeを観測値と未確認事項に分けた
+- [ ] ID寿命、callback順、空slot、bank終端、`mix_console_root_children_v1` scope / repeat edgeを観測値と未確認事項に分けた
 - [ ] Mixer BankとDirectAccessの制約を比較した
+- [ ] Mixer Bankのauthorityをcore MixConsole channelに限定し、DirectAccessはTrack列挙non-authoritative、Project-wide Folder completenessは未証明と明記した
 - [ ] 完全性を保証できない項目を`PENDING`、`NOT_AVAILABLE`、`UNSUPPORTED`、`INCONCLUSIVE_*`から適切に分類した
 - [ ] 推奨方式とfallback方針を上のgateから導出した
 - [ ] 13.0.50未installと、C15 API v1.3 typeをv1.2へ一般化できないことを維持した

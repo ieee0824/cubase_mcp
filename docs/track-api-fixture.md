@@ -87,14 +87,19 @@ Cubase 15ではMixer Bank用とDirectAccess用にfixtureやrunを複製しませ
 
 ## 作成するlocal project
 
-| case | local file名 | 用途 |
+| case / support artifact | local file名 | 用途 |
 | --- | --- | --- |
+| INIT bootstrap support artifact（checkpointではない） | `CMCP_TrackFixture_Bootstrap_Empty.cpr` | revision 2 primary C13 / C15 runのINITで、MIDI Remote mapping pageを決定的にactivateするための空project |
 | E0 | `CMCP_TrackFixture_Empty.cpr` | project Trackが0本の状態 |
 | E1 | `CMCP_TrackFixture_One.cpr` | 通常Audio Trackが1本だけの状態 |
 | E8 | `CMCP_TrackFixture_Eight.cpr` | Mixer Bank対象がbank幅と同じ8本の境界状態 |
 | C1 | `CMCP_TrackFixture_Core_Baseline.cpr` | 変更前の基準状態 |
 | M1 | `CMCP_TrackFixture_Mutation.cpr` | rename / add / delete用copy |
 | O1 | `CMCP_TrackFixture_Optional_IO_VCA.cpr` | Input / Output / VCAの任意調査 |
+
+INIT bootstrapはrevision 2のprimary C13 / C15 runで例外なく使用します。対象runとexactly同じCubase versionを使い、同じ専用directory内へ新規の空projectとして作成し、Project Trackが0本であることを確認します。audio / MIDI / video、event、part、automation、plug-in、user preset、通常project由来の設定や名前、新しいrouting設定を追加せず、実機inputをmonitorしません。別versionで保存したproject、既存の通常project、正式なE0をbootstrapへ転用しません。run前にbootstrapのSHA-256をlocal recordへ固定し、対象versionを起動するexactな製品、application名またはbundle path、およびbootstrapのabsolute pathもlocalで確定します。これらのabsolute pathをraw JSONL、manifest、run ID、共有report、repositoryへ転記しません。
+
+bootstrapはfixture caseでも独立したraw checkpointでもなく、bootstrap用のmanifest annotationを追加しません。revision 2のexactly 44 checkpointとmanifest v1 schemaは変更せず、既存の`INIT` annotationだけを使用します。`INIT`の`action_confirmed`は、run前に確定したexactな製品をbootstrap documentと同じOS launch操作で起動した場合だけ`true`にします。`ui_ground_truth_confirmed`は、Project windowのbasenameがexactly `CMCP_TrackFixture_Bootstrap_Empty`、Project Trackが0本、他のprojectが開いていない、dirty / modified表示がなくbootstrapを変更していないことをUIで確認した場合だけ`true`にします。INITで得たbootstrapの初期snapshot、明示的final snapshot、またはINIT annotationを、正式なE0のsnapshot、UI ground truth、action確認へ流用してはいけません。
 
 ## 共通のTrack追加方法
 
@@ -319,7 +324,11 @@ fixtureの正解は次のUI ground truthです。host APIの結果がどの候�
 
 初期化、bank操作、mutation、project切替、reload、restartを含むすべての観測checkpointは、操作直前から連続してcallbackを記録し、UIで期待状態を確認した後も操作開始から`5000 ms`以上観測を続けます。監査可能な観測anchorは、observation cutを使う21 checkpointと`INIT` / `R1` / `R2`ではaction marker時刻、bank navigationではReset / Next / Prev成功responseの受信時刻です。cut checkpointでは成功したcut responseと`boundary_source = probe.observation.cut_response`の自動action markerをcollectorが1つのatomic output pairとして隣接させ、同じrequest ID / epochをmarkerへ保持します。checkpoint開始時刻、cut response、navigation commandより前のaction markerを5000 ms windowの代用にしません。各操作の直前にはraw `collector_action` markerをexactly 1件記録し、1秒のquiet periodへ早く到達してもwindowを短縮しません。
 
-`INIT`ではaction markerを書いてから対象Cubaseを起動し、その後に同じsourceの`probe.loaded`を受信します。cold launch時間はR1 / R2用の`reconnect_deadline_ms`へ含めず、任意の上限で正しいrunを捨てません。新しいactivationは`probe.loaded` → `probe.mapping_active` → `probe.capabilities` → `reason = page_activate`の`MB_CORE_ALL` / `MB_CORE_VISIBLE`初期snapshot完了 → runtime capabilityがDirectAccessをsupported / activeとした場合だけその初期snapshot完了 → `probe.ready(true, initial_snapshots_complete = true)`の順を必須とします。R1 / R2でもaction markerより前のlifecycleや初期snapshotを新activationの証拠へ流用せず、同じ順序と完全性を再検証します。E0 / E1 / E8 / C1やS9等の通常checkpointで同sourceのpage reactivationが発生した場合は、action後の`ready(false)` → mapping → capability → 初期snapshot → readyを同checkpoint内でexactly 1回完了し、target選択が破棄された後の再discoverを行ってからfinal snapshotへ進みます。通常checkpointで新しい`probe.loaded`、partial / 複数activation、action前sequenceの流用、再discover省略を許しません。
+`INIT`ではaction markerを書き、その直後に、run前に確定したexactな対象CubaseとINIT bootstrapを同じOS launch操作へ指定して起動します。macOSでは`open -a "<EXACT_CUBASE_APPLICATION_OR_BUNDLE_PATH>" "<ABSOLUTE_BOOTSTRAP_PROJECT_PATH>"`のようにapplication / bundleとdocumentの両方をquoteし、absolute pathはlocal commandにだけ使用します。Cubaseだけを先にHubへ起動してからbootstrapを手動で開く、Hub起動で始めたINITへbootstrapを後付けする、または別のprojectを経由して救済することを禁止します。bootstrapが同じlaunch操作で開かなかった場合はそのrunを停止し、collectorをgraceful drainした後、fresh run ID、fresh collector process、fresh JSONLでINITから再実施します。
+
+INIT終了まで別projectを開かず、同じsourceからexactly 1回の完全な`probe.loaded(source_seq = 1)` → `probe.mapping_active` → `probe.capabilities` → `reason = page_activate`の`MB_CORE_ALL` / `MB_CORE_VISIBLE`初期snapshot完了 → runtime capabilityがDirectAccessをsupported / activeとした場合だけその初期snapshot完了 → `probe.ready(true, initial_snapshots_complete = true)`を必須とします。INIT内の新しい`probe.loaded`の追加、`probe.ready(false)`、2回目の`probe.mapping_active` / capability / page-activate initial snapshot set / `probe.ready(true)`、partial activation、別sourceのactivationはrun invalidです。後続sequenceを待って成功へ戻さず、UI操作を進めず、fresh runで再実施します。cold launch時間はR1 / R2用の`reconnect_deadline_ms`へ含めず、任意の上限で正しいrunを捨てません。R1 / R2でもaction markerより前のlifecycleや初期snapshotを新activationの証拠へ流用せず、同じ順序と完全性を再検証します。E0 / E1 / E8 / C1やS9等の通常checkpointで同sourceのpage reactivationが発生した場合は、action後の`ready(false)` → mapping → capability → 初期snapshot → readyを同checkpoint内でexactly 1回完了し、target選択が破棄された後の再discoverを行ってからfinal snapshotへ進みます。通常checkpointで新しい`probe.loaded`、partial / 複数activation、action前sequenceの流用、再discover省略を許しません。
+
+INIT終了後にexact ID `E0`を開始し、`probe.observation.cut`の成功responseと隣接する自動action markerを確認した直後に、bootstrapとは別fileの正式な`CMCP_TrackFixture_Empty.cpr`を開きます。Project windowでbasenameが`CMCP_TrackFixture_Empty`であり、Project Trackが0本であることを目視確認できた場合だけ、E0 annotationの`action_confirmed`と`ui_ground_truth_confirmed`を`true`にします。project切替によりsame-source reactivationが発生した場合は前段落のexactly 1 sequenceと再discoverをE0内で完了します。E0内の新しい`probe.loaded`、partialまたは複数のreactivation、正式E0を開かなかった状態、basenameまたは0本を確認できない状態はrun invalidです。
 
 各checkpointでは次の順序を固定します。
 
@@ -439,8 +448,9 @@ fixture作成前にseparate MixConsoleの同期toggleが`on` / `off` / `not open
 
 1. separate MixConsoleを使った場合は`Sync Visibility of Project and MixConsole`をrun前と同じ値へ戻す。run前に開いていなければfixture用windowを閉じる。lower-zoneはtoggleを持たないため操作しない。
 2. O1を実施した場合はInput / Output bus inventoryがpre-run記録と完全に一致していることを再確認する。
-3. fixture project以外を変更・保存していないことを確認する。
-4. 原状回復を確認できない場合は`RESTORE_FAILED`として停止し、通常projectを開かない。
+3. INIT bootstrapが開いていないこと、dirty / modified表示のあるbootstrapを保存していないこと、およびbootstrapのrun後SHA-256がrun前のlocal SHA-256と完全に一致することを確認する。不一致ならそのrunを監査へ使わず、bootstrapを手動確認・再作成してfresh runを開始できる状態へ戻すまで通常projectを開かない。
+4. fixture project以外を変更・保存していないことを確認する。
+5. 原状回復を確認できない場合は`RESTORE_FAILED`として停止し、通常projectを開かない。
 
 ## runtime evidenceの3 artifact
 
@@ -563,6 +573,9 @@ redacted reportでは最後の監査対象snapshotごとに、slot / tree順、a
 
 - [ ] run情報に正確なOS、Cubase version/build、MIDI Remote APIを記録した
 - [ ] audit manifest v1の`fixture_revision`が`2`で、raw JSONLと`run_id`が一致する
+- [ ] 対象versionで新規作成したINIT bootstrapが正式E0とは別fileで、0 Project Trackかつmedia、event、part、automation、plug-in、user preset、新しいrouting設定を持たず、run前SHA-256をlocalに固定した
+- [ ] exactなCubase application名またはbundle pathとbootstrap absolute pathをrun前にlocalで確定し、INIT action直後の同じOS launch操作へ両方をquoteして指定した。Hub先行起動やprimary INIT中のbootstrap後付け救済を行っていない
+- [ ] INIT annotationはexact bootstrap basename、0 Project Track、他projectなし、dirty / modified表示なしをUI確認しており、full lifecycleがexactly 1回で、追加loaded、ready(false)、2回目のmapping / capability / page-activate snapshot set / ready、別source activationがない
 - [ ] E0のProject Trackが0本である
 - [ ] E8がAudio Track 8本だけで、E8-01〜E8-08の順・state・visibilityが一致する
 - [ ] E8の両primary configでReset / Next / Prev / Resetを独立windowとして観測した
@@ -582,6 +595,7 @@ redacted reportでは最後の監査対象snapshotごとに、slot / tree順、a
 - [ ] mutationはM1 copyで行い、C1 baselineを変更していない
 - [ ] audit v1ではO1を実施せず、`skipped / not_separately_authorized`を記録した
 - [ ] primary runでseparate MixConsoleを使い、visibility同期をrun前の状態へ戻し、optional bus inventoryへ触れていない
+- [ ] cleanupでINIT bootstrapが閉じており、run後SHA-256がrun前SHA-256と一致し、bootstrapを変更・保存していない
 - [ ] redacted reportの`run-<16-hex>` alias、raw JSONL digest、manifest digest、semantic projectionを保存した
 - [ ] `.cpr`、raw log、device名、absolute path、credentialをGitへ追加していない
 - [ ] `git status --short`と`git diff --name-only`に意図した文書以外のfixture artifactがない

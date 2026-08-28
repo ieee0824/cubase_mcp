@@ -234,7 +234,7 @@ discoveryだけは`target_instance_id: null`でbroadcastし、既定1000 msのbo
 
 0 instance、複数instance、初期化未完のinstanceが応答したrunではtargetを選ばずfatalにします。`probe.ready(true)`済みのexactly 1 instanceをwindow全体で確認した後のcommandだけが、collector-localの`@selected`を送信barrierでそのsourceへ解決して直列に送信されます。page deactivate / reactivate、reload、restartでmapping lifecycleが変わった後は選択を破棄し、再discoverします。operator-facing commandやmanifestへraw source IDをcopyしません。
 
-E0 / E1 / E8 / C1やS9のproject切替を含む通常checkpointでも、hostが同じscript sourceをpage deactivate / reactivateする場合があります。その場合は操作を追加せず、同じcheckpoint内でaction後の`probe.ready(false)` → 同sourceの`probe.mapping_active` → capability → 全初期snapshot → `probe.ready(true)`をexactly 1 sequenceとして完了させ、再discoverしてからfinal snapshotへ進みます。新しい`probe.loaded`はINIT / R1 / R2以外では許可しません。lifecycleが無いrunへこのsequenceを捏造せず、partial、複数回、action前のsequence流用、再discoverなしをauditorが拒否します。
+E0 / E1 / E8 / C1やS9のproject切替を含む通常checkpointでも、hostが同じscript sourceをpage deactivate / reactivateする場合があります。その場合は操作を追加せず、同じcheckpoint内でaction後の`probe.ready(false)` → 同sourceの`probe.mapping_active` → capability → 全初期snapshot → `probe.ready(true)`をexactly 1 sequenceとして完了させ、再discoverしてからfinal snapshotへ進みます。旧activationで既に受信したbounded feedbackは`probe.ready(false)`より前に全件送信し、64件の1 idle batchを超えても最大queue件数まで有限回でdrainします。初期化中のDirectAccess change callbackもfeedbackとして保存しますが、`page_activate` snapshotが同じ初期状態を覆うため、ready前に別の自動change snapshotをscheduleしません。page境界で無効になるcoalescedな非command DirectAccess change snapshotだけはcancelし、明示command、`page_activate`、bank snapshot、未知reason、または未drain feedbackを残したままinactiveへ移行しません。新しい`probe.loaded`はINIT / R1 / R2以外では許可しません。lifecycleが無いrunへこのsequenceを捏造せず、partial、複数回、action前のsequence流用、再discoverなしをauditorが拒否します。
 
 以下は独立したcommand例であり、1 checkpoint内の連続sequenceではありません。`probe.capabilities.get`は`INIT`だけ、`probe.observation.cut`は上記21 checkpointだけ、bank操作は対応navigation checkpointだけで使います。final snapshotはcheckpoint契約に従って必要なprojectionを順に送ります。
 
@@ -258,7 +258,7 @@ targeted requestは、同じrequest IDに対する同じ`source_instance_id`か�
 
 `probe.bank.chunk` / `probe.direct_access.chunk`は`source_instance_id + snapshot_id`単位で、chunk count、0始まりの連続index、total item数、complete flagを検査します。fragment化されたhost IDもreference、fragment count / index、UTF-8 byte lengthを検査します。欠落、重複、逆順、不整合、未完snapshot / fragment / requestを残したEOFはrun fatalです。collectorはEOF後も設定されたdrain期限まで受信を続け、quiescentにならないrunを成功にしません。
 
-`probe.overflow`はsource queue、outbound frame、host-ID fragment上限、snapshot queue、deactivation時の未送信破棄を含め、理由を問わずrun fatalです。raw logの`collector_summary`が`integrity_ok: true`かつ`exit_ok: true`でないrunを`OBSERVED`へ使いません。
+`probe.overflow`はsource queue、outbound frame、host-ID fragment上限、snapshot queue、deactivation時の未drain feedbackまたは必須work破棄を含め、理由を問わずrun fatalです。唯一、same-script reactivationまたはrun内restart境界で、旧mappingのcallbackを全件送信済みかつ次の`page_activate` snapshotに置換されるcoalescedな非command DirectAccess change snapshotのcancelは未送信証拠の破棄として扱いません。明示command snapshot、`page_activate`、bank snapshot、未知reasonはこの例外へ含めません。raw logの`collector_summary`が`integrity_ok: true`かつ`exit_ok: true`でないrunを`OBSERVED`へ使いません。
 
 Cubaseは新しく現れたMIDI outputを検出するため、Universal Non-Realtime broadcast Identity Requestのexact 6 byte `F0 7E 7F 06 01 F7`を専用virtual portへ反復送信する場合があります。collectorはSysEx reassembly後、このexact frameだけをProbe transport外の標準検出trafficとしてingress / quiet-period計数前に無視します。device ID、Sub-ID、長さ、終端を含む1 byteでも異なるframeやその他のforeign SysExは従来どおりfatalです。この検出trafficをProbe message、callback不存在、source sequence、checkpoint activityの証拠へ数えません。
 

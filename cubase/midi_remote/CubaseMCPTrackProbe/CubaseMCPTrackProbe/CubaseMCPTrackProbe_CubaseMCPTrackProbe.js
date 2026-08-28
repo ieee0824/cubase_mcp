@@ -36,6 +36,8 @@ var MAX_ITEMS_PER_CHUNK = 2
 // initial DirectAccess change burst without making the queue unbounded.
 var MAX_PENDING_FEEDBACK = 512
 var MAX_FEEDBACK_PER_IDLE = 64
+var MAX_DEACTIVATION_FEEDBACK_FLUSH_PASSES =
+    Math.ceil(MAX_PENDING_FEEDBACK / MAX_FEEDBACK_PER_IDLE) + 2
 var MAX_PENDING_BANK_SNAPSHOTS = 32
 var MAX_PENDING_DIRECT_ACCESS_SNAPSHOTS = 16
 var MAX_DIRECT_ACCESS_NODES = 256
@@ -666,6 +668,33 @@ function flushFeedback(activeDevice) {
     enqueueDroppedFeedbackMarker()
 }
 
+function flushFeedbackBeforeDeactivation(activeDevice) {
+    var passes = 0
+    while (
+        feedbackIsPending() &&
+        passes < MAX_DEACTIVATION_FEEDBACK_FLUSH_PASSES
+    ) {
+        flushFeedback(activeDevice)
+        ++passes
+    }
+}
+
+function isInvalidatedDirectAccessSnapshot(pending) {
+    return pending.reason === 'object_change' ||
+        pending.reason === 'object_will_be_removed' ||
+        pending.reason === 'parameter_change'
+}
+
+function cancelInvalidatedDirectAccessSnapshots() {
+    var retained = []
+    for (var index = 0; index < pendingDirectAccessSnapshots.length; ++index) {
+        if (!isInvalidatedDirectAccessSnapshot(pendingDirectAccessSnapshots[index])) {
+            retained.push(pendingDirectAccessSnapshots[index])
+        }
+    }
+    pendingDirectAccessSnapshots = retained
+}
+
 function feedbackIsPending() {
     return pendingFeedback.length > 0 || pendingDroppedFeedback.total > 0
 }
@@ -804,13 +833,13 @@ function makeDirectAccess() {
 
     candidate.mOnObjectChange = function (activeDevice, activeMapping, objectId) {
         recordDirectAccessChange('object_change', objectId, null)
-        if (!directAccessUpdateInProgress) {
+        if (pageIsReady && !directAccessUpdateInProgress) {
             scheduleDirectAccessSnapshotOnce('object_change')
         }
     }
     candidate.mOnObjectWillBeRemoved = function (activeDevice, activeMapping, objectId) {
         recordDirectAccessChange('object_will_be_removed', objectId, null)
-        if (!directAccessUpdateInProgress) {
+        if (pageIsReady && !directAccessUpdateInProgress) {
             scheduleDirectAccessSnapshotOnce('object_will_be_removed')
         }
     }
@@ -821,7 +850,7 @@ function makeDirectAccess() {
         parameterTag
     ) {
         recordDirectAccessChange('parameter_change', objectId, parameterTag)
-        if (!directAccessUpdateInProgress) {
+        if (pageIsReady && !directAccessUpdateInProgress) {
             scheduleDirectAccessSnapshotOnce('parameter_change')
         }
     }
@@ -1642,6 +1671,15 @@ function deactivatePage(activeDevice, activeMapping) {
     }
 
     deactivateDirectAccess(activeDevice, activeMapping)
+    // Cubase can synchronously enqueue more than one idle batch while a
+    // project-activation dialog blocks mOnIdle. Preserve that evidence before
+    // ready(false); callbacks emitted after the inactive boundary are invalid.
+    flushFeedbackBeforeDeactivation(activeDevice)
+    // Coalesced change snapshots describe the mapping that is now being torn
+    // down. Their underlying callbacks were drained above and the next mapping
+    // emits a complete page_activate snapshot. Command and activation work is
+    // deliberately retained so the fail-closed discard check still catches it.
+    cancelInvalidatedDirectAccessSnapshots()
     var initialSnapshotsComplete = pageIsReady
     var discardedItems =
         pendingFeedback.length +

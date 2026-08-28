@@ -48,6 +48,13 @@ function makeDirectAccessMock(options, calls) {
         mOnParameterChange() {},
         activate(activeMapping) {
             calls.directActivate.push(activeMapping)
+            if (options.directActivateObjectChange !== undefined) {
+                this.mOnObjectChange(
+                    options.activeDeviceForDirectUpdate,
+                    activeMapping,
+                    options.directActivateObjectChange
+                )
+            }
             if (options.directActivateThrows) {
                 throw new Error(externalError || 'direct activate failed')
             }
@@ -67,6 +74,17 @@ function makeDirectAccessMock(options, calls) {
         },
         deactivate(activeMapping) {
             calls.directDeactivate.push(activeMapping)
+            for (
+                let index = 0;
+                index < (options.directDeactivateRemovalCount || 0);
+                index += 1
+            ) {
+                this.mOnObjectWillBeRemoved(
+                    options.activeDeviceForDirectUpdate,
+                    activeMapping,
+                    index
+                )
+            }
             if (options.directDeactivateThrows) {
                 throw new Error(externalError || 'direct deactivate failed')
             }
@@ -904,16 +922,197 @@ function testSnapshotQueuesAreBoundedAndDeactivationIsFailClosed() {
         deactivation.activeMapping,
         'pending-before-deactivate'
     )
+    const deactivationMessageStart = messages(deactivation).length
     deactivation.deactivate()
 
-    const discard = events(deactivation, 'probe.overflow').find(event =>
-        event.data.stream === 'deactivation_discard'
+    const deactivationMessages = messages(deactivation).slice(deactivationMessageStart)
+    const flushedFeedbackIndex = deactivationMessages.findIndex(message =>
+        message.event === 'probe.bank.chunk' &&
+        message.data.stream === 'mixer_bank_feedback'
     )
-    assert.ok(discard)
-    assert.equal(discard.data.pending_feedback_items, 1)
-    assert.equal(discard.data.discarded_items, 1)
+    const inactiveIndex = deactivationMessages.findIndex(message =>
+        message.event === 'probe.ready' && message.data.ready === false
+    )
+    assert.ok(flushedFeedbackIndex >= 0)
+    assert.ok(inactiveIndex > flushedFeedbackIndex)
+    assert.equal(events(deactivation, 'probe.overflow').length, 0)
+    assert.equal(deactivation.context.pendingFeedback.length, 0)
     assert.equal(events(deactivation, 'probe.ready').at(-1).data.ready, false)
     assertSourceSequence(deactivation)
+
+    const initializing = createHarness({
+        directAccessVersion: '1.3',
+        directActivateObjectChange: 0,
+        graph: { base: 0, children: { 0: [] }, metadata: {} }
+    })
+    initializing.activate()
+    assert.deepEqual(
+        Array.from(
+            initializing.context.pendingDirectAccessSnapshots,
+            pending => pending.reason
+        ),
+        ['page_activate']
+    )
+    initializing.idle(5)
+    const initializingFeedback = eventItems(
+        initializing,
+        'probe.direct_access.chunk',
+        data => data.stream === 'direct_access_feedback'
+    )
+    assert.equal(initializingFeedback.length, 1)
+    assert.equal(initializingFeedback[0].change, 'object_change')
+    assert.equal(
+        events(initializing, 'probe.direct_access.chunk').some(event =>
+            event.data.stream === 'direct_access_snapshot' &&
+            event.data.reason === 'object_change'
+        ),
+        false
+    )
+    assert.ok(events(initializing, 'probe.direct_access.chunk').some(event =>
+        event.data.stream === 'direct_access_snapshot' &&
+        event.data.reason === 'page_activate' &&
+        event.data.snapshot_complete === true
+    ))
+    assert.equal(events(initializing, 'probe.ready').at(-1).data.ready, true)
+    assert.equal(events(initializing, 'probe.overflow').length, 0)
+    assertSourceSequence(initializing)
+
+    const reactivation = createHarness({
+        directAccessVersion: '1.3',
+        directDeactivateRemovalCount: 88,
+        graph: { base: 0, children: { 0: [] }, metadata: {} }
+    })
+    reactivation.activate()
+    reactivation.idle(5)
+    assert.equal(reactivation.context.pendingFeedback.length, 0)
+    assert.equal(reactivation.context.pendingDirectAccessSnapshots.length, 0)
+
+    const reactivationMessageStart = messages(reactivation).length
+    reactivation.deactivate()
+    const boundaryMessages = messages(reactivation).slice(reactivationMessageStart)
+    const boundaryFeedback = boundaryMessages.filter(message =>
+        message.type === 'event' &&
+        message.data &&
+        (
+            message.data.stream === 'mixer_bank_feedback' ||
+            message.data.stream === 'direct_access_feedback'
+        )
+    )
+    const boundaryObservationSequence = boundaryFeedback.flatMap(message =>
+        message.data.items.map(item => item.observation_seq)
+    )
+    assert.equal(boundaryObservationSequence.length, 88)
+    for (let index = 1; index < boundaryObservationSequence.length; index += 1) {
+        assert.equal(
+            boundaryObservationSequence[index],
+            boundaryObservationSequence[index - 1] + 1
+        )
+    }
+    const boundaryInactiveIndex = boundaryMessages.findIndex(message =>
+        message.event === 'probe.ready' && message.data.ready === false
+    )
+    assert.ok(boundaryInactiveIndex > 0)
+    assert.ok(boundaryMessages.slice(0, boundaryInactiveIndex).includes(
+        boundaryFeedback.at(-1)
+    ))
+    assert.equal(
+        boundaryMessages.some(message =>
+            message.event === 'probe.direct_access.chunk' &&
+            message.data.stream === 'direct_access_snapshot' &&
+            [
+                'object_change',
+                'object_will_be_removed',
+                'parameter_change'
+            ].includes(message.data.reason)
+        ),
+        false
+    )
+    assert.equal(events(reactivation, 'probe.overflow').length, 0)
+    assert.equal(reactivation.context.pendingFeedback.length, 0)
+    assert.equal(reactivation.context.pendingDirectAccessSnapshots.length, 0)
+
+    reactivation.page.mOnActivate(
+        reactivation.activeDevice,
+        reactivation.activeMapping
+    )
+    reactivation.idle(5)
+    assert.equal(events(reactivation, 'probe.loaded').length, 1)
+    assert.equal(events(reactivation, 'probe.mapping_active').length, 2)
+    assert.equal(events(reactivation, 'probe.ready').at(-1).data.ready, true)
+    assert.equal(events(reactivation, 'probe.overflow').length, 0)
+    assertSourceSequence(reactivation)
+
+    for (const removalCount of [512, 513]) {
+        const boundary = createHarness({
+            directAccessVersion: '1.3',
+            directDeactivateRemovalCount: removalCount,
+            graph: { base: 0, children: { 0: [] }, metadata: {} }
+        })
+        boundary.activate()
+        boundary.idle(5)
+        boundary.deactivate()
+        const drained = eventItems(
+            boundary,
+            'probe.direct_access.chunk',
+            data => data.stream === 'direct_access_feedback'
+        )
+        assert.equal(drained.length, 512)
+        const queueOverflow = events(boundary, 'probe.overflow').filter(event =>
+            event.data.stream === 'feedback_queue'
+        )
+        assert.equal(queueOverflow.length, removalCount === 512 ? 0 : 1)
+        assert.equal(
+            events(boundary, 'probe.overflow').length,
+            removalCount === 512 ? 0 : 1
+        )
+        if (removalCount === 513) {
+            assert.equal(queueOverflow[0].data.dropped_items, 1)
+            const boundaryMessages = messages(boundary)
+            const overflowIndex = boundaryMessages.findIndex(message =>
+                message.event === 'probe.overflow' &&
+                message.data.stream === 'feedback_queue'
+            )
+            const readyIndex = boundaryMessages.findIndex(message =>
+                message.event === 'probe.ready' && message.data.ready === false
+            )
+            assert.ok(overflowIndex >= 0)
+            assert.ok(readyIndex > overflowIndex)
+        }
+        assert.equal(boundary.context.pendingFeedback.length, 0)
+        assert.equal(boundary.context.pendingDroppedFeedback.total, 0)
+        assert.equal(boundary.context.pendingDirectAccessSnapshots.length, 0)
+        assert.equal(events(boundary, 'probe.ready').at(-1).data.ready, false)
+        assertSourceSequence(boundary)
+    }
+
+    const commandPending = createHarness({
+        directAccessVersion: '1.3',
+        graph: { base: 0, children: { 0: [] }, metadata: {} }
+    })
+    commandPending.activate()
+    commandPending.idle(5)
+    request(commandPending, 'pending-bank-snapshot', 'probe.bank.snapshot', {
+        config_id: 'MB_CORE_ALL'
+    })
+    request(commandPending, 'pending-command-snapshot', 'probe.direct_access.snapshot')
+    commandPending.context.pendingDirectAccessSnapshots.push(
+        { reason: 'page_activate', updated: false },
+        { reason: 'future_reason', updated: false }
+    )
+    assert.equal(response(commandPending, 'pending-bank-snapshot').type, 'response')
+    assert.equal(response(commandPending, 'pending-command-snapshot').type, 'response')
+    assert.equal(commandPending.context.pendingBankSnapshots.length, 1)
+    assert.equal(commandPending.context.pendingDirectAccessSnapshots.length, 3)
+    commandPending.deactivate()
+    const commandDiscard = events(commandPending, 'probe.overflow').find(event =>
+        event.data.stream === 'deactivation_discard'
+    )
+    assert.ok(commandDiscard)
+    assert.equal(commandDiscard.data.pending_bank_snapshots, 1)
+    assert.equal(commandDiscard.data.pending_direct_access_snapshots, 3)
+    assert.equal(commandDiscard.data.discarded_items, 4)
+    assert.equal(events(commandPending, 'probe.ready').at(-1).data.ready, false)
+    assertSourceSequence(commandPending)
 
     const lateCallback = createHarness()
     lateCallback.activate()

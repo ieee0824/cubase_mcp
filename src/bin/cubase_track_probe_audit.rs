@@ -4323,7 +4323,12 @@ fn validate_commands(
             }
         }
         if bank_operation(checkpoint_id).is_some() {
-            validate_navigation_generation(evidence, actual_ids)?;
+            validate_navigation_generation(
+                evidence,
+                checkpoint_id,
+                actual_ids,
+                same_script_reactivated,
+            )?;
         }
         validate_final_projection_isolation(checkpoint_id, evidence, actual_ids)?;
         let final_request_id = actual_ids
@@ -4527,8 +4532,14 @@ fn final_snapshot_anchor(
     Ok(response.received_monotonic_timestamp_ms)
 }
 
-fn validate_navigation_generation(evidence: &Evidence, request_ids: &[String]) -> AuditResult<()> {
-    let mut generations = Vec::new();
+fn validate_navigation_generation(
+    evidence: &Evidence,
+    checkpoint_id: &'static str,
+    request_ids: &[String],
+    same_script_reactivated: bool,
+) -> AuditResult<()> {
+    let mut operation = None;
+    let mut final_snapshot = None;
     for request_id in request_ids {
         let command = evidence
             .commands
@@ -4554,9 +4565,54 @@ fn validate_navigation_generation(evidence: &Evidence, request_ids: &[String]) -
             ))
             .and_then(|assembly| assembly.bank_generation)
             .ok_or_else(|| AuditError::new("NAVIGATION_GENERATION_INVALID"))?;
-        generations.push(generation);
+        if command.method == "probe.bank.snapshot" {
+            final_snapshot = Some((command, snapshot, generation));
+        } else {
+            operation = Some((command, snapshot, generation));
+        }
     }
-    if generations.len() != 2 || generations[0] != generations[1] {
+    let Some((operation_command, operation_snapshot, operation_generation)) = operation else {
+        return Err(AuditError::new("NAVIGATION_GENERATION_INVALID"));
+    };
+    let Some((final_command, final_snapshot, final_generation)) = final_snapshot else {
+        return Err(AuditError::new("NAVIGATION_GENERATION_INVALID"));
+    };
+    if operation_command.config_id != final_command.config_id
+        || operation_snapshot.source_instance_id != final_snapshot.source_instance_id
+    {
+        return Err(AuditError::new("NAVIGATION_GENERATION_INVALID"));
+    }
+    if !same_script_reactivated {
+        if operation_generation != final_generation {
+            return Err(AuditError::new("NAVIGATION_GENERATION_INVALID"));
+        }
+        return Ok(());
+    }
+
+    let mut page_activations = evidence.snapshots.iter().filter(|snapshot| {
+        snapshot.checkpoint_id == checkpoint_id
+            && snapshot.source_instance_id == operation_snapshot.source_instance_id
+            && snapshot.kind == SnapshotKind::Bank
+            && snapshot.config_id == operation_command.config_id
+            && snapshot.reason == "page_activate"
+    });
+    let page_activation = page_activations
+        .next()
+        .ok_or_else(|| AuditError::new("NAVIGATION_GENERATION_INVALID"))?;
+    if page_activations.next().is_some() {
+        return Err(AuditError::new("NAVIGATION_GENERATION_INVALID"));
+    }
+    let page_activation_generation = evidence
+        .raw_snapshots
+        .get(&(
+            page_activation.source_instance_id.clone(),
+            page_activation.snapshot_id.clone(),
+        ))
+        .and_then(|assembly| assembly.bank_generation)
+        .ok_or_else(|| AuditError::new("NAVIGATION_GENERATION_INVALID"))?;
+    if operation_generation.checked_add(1) != Some(page_activation_generation)
+        || final_generation != page_activation_generation
+    {
         return Err(AuditError::new("NAVIGATION_GENERATION_INVALID"));
     }
     Ok(())
@@ -8167,6 +8223,40 @@ mod tests {
         artifact.records.retain(|record| !predicate(record));
     }
 
+    fn set_bank_snapshot_generation(
+        artifact: &mut TestArtifact,
+        checkpoint_id: &str,
+        reason: &str,
+        config_id: Option<&str>,
+        generation: u64,
+    ) {
+        for data in artifact.records.iter_mut().filter_map(|record| {
+            let matches = record["record_type"] == "probe_event"
+                && record["checkpoint_id"] == checkpoint_id
+                && record["message"]["event"] == "probe.bank.chunk"
+                && record["message"]["data"]["stream"] == "mixer_bank_snapshot"
+                && record["message"]["data"]["reason"] == reason
+                && config_id
+                    .is_none_or(|config_id| record["message"]["data"]["config_id"] == config_id);
+            matches.then(|| &mut record["message"]["data"])
+        }) {
+            data["requested_bank_generation"] = json!(generation);
+            data["bank_generation"] = json!(generation);
+            for item in data["items"].as_array_mut().unwrap() {
+                item["bank_generation"] = json!(generation);
+                for observed_generation in item["field_observation_generation"]
+                    .as_object_mut()
+                    .unwrap()
+                    .values_mut()
+                {
+                    if observed_generation.as_u64().is_some() {
+                        *observed_generation = json!(generation);
+                    }
+                }
+            }
+        }
+    }
+
     fn direct_access_command_snapshot_data_mut<'a>(
         artifact: &'a mut TestArtifact,
         checkpoint_id: &str,
@@ -10730,13 +10820,51 @@ mod tests {
         let complete = valid_artifact_with_options(Profile::C13MixerBank, false, Some("S0"));
         let report = audit_artifact(&complete).unwrap();
         assert_eq!(report.checkpoint_count, REQUIRED_CHECKPOINTS.len());
+    }
 
-        let navigation = valid_artifact_with_options(
-            Profile::C13MixerBank,
-            false,
-            Some("E8-MB_CORE_ALL-B0-reset"),
+    #[test]
+    fn navigation_reactivation_tracks_the_page_generation() {
+        let checkpoint_id = "E8-MB_CORE_ALL-B0-reset";
+        let mut navigation =
+            valid_artifact_with_options(Profile::C13MixerBank, false, Some(checkpoint_id));
+        set_bank_snapshot_generation(&mut navigation, checkpoint_id, "page_activate", None, 2);
+        set_bank_snapshot_generation(
+            &mut navigation,
+            checkpoint_id,
+            "command_snapshot",
+            Some("MB_CORE_ALL"),
+            2,
         );
         let report = audit_artifact(&navigation).unwrap();
         assert_eq!(report.checkpoint_count, REQUIRED_CHECKPOINTS.len());
+
+        let mut stale_final =
+            valid_artifact_with_options(Profile::C13MixerBank, false, Some(checkpoint_id));
+        set_bank_snapshot_generation(&mut stale_final, checkpoint_id, "page_activate", None, 2);
+        assert_eq!(
+            audit_artifact(&stale_final).unwrap_err().code,
+            "NAVIGATION_GENERATION_INVALID"
+        );
+
+        let mut skipped_generation =
+            valid_artifact_with_options(Profile::C13MixerBank, false, Some(checkpoint_id));
+        set_bank_snapshot_generation(
+            &mut skipped_generation,
+            checkpoint_id,
+            "page_activate",
+            None,
+            3,
+        );
+        set_bank_snapshot_generation(
+            &mut skipped_generation,
+            checkpoint_id,
+            "command_snapshot",
+            Some("MB_CORE_ALL"),
+            3,
+        );
+        assert_eq!(
+            audit_artifact(&skipped_generation).unwrap_err().code,
+            "NAVIGATION_GENERATION_INVALID"
+        );
     }
 }

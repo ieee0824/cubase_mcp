@@ -219,6 +219,7 @@ stdinは1行1 JSONです。`collector.checkpoint.begin` / `collector.action` / `
 ```
 
 - checkpoint IDは同一run内で一意とし、同時に複数を開かない。
+- UI操作は対象Cubase instanceへの排他的入力として扱い、可能な場合はmouse pointer位置に依存しないsemantic targetを使う。操作直前にactive app / window / project / dialog / targetを再取得し、直後に期待したUI状態とProbe差分を再確認する。別operatorの入力、focus / window / targetの移動、対象外への作用、または誤clickの可能性があればannotationを成功へせずrunを停止し、同じcheckpoint内で再clickしない。pointer移動自体を取得できない実装も、意図した座標だけから成功を推測しない。
 - `begin`後、実操作直前に同じIDのaction markerをexactly 1回記録する。`E0` / `E1` / `E8` / `C1`とS0〜S9のexactly 21 checkpointでは、最初のtargeted commandとして`probe.observation.cut`を`@selected`へ送る。成功responseはcollectorがraw responseと同request ID / epochのaction markerをatomic output pairとして隣接出力するため、operatorは`collector.action`を重ねず、自動marker直後にUI操作する。`INIT` / `R1` / `R2`と、Reset / Next / Prevが新しいbank generationを作るE8 / C1 navigationではcutを送らず、明示的`collector.action`を使う。navigation commandはmarkerから1000 ms以内に送る。cut checkpointと`INIT` / `R1` / `R2`はaction marker、navigationは操作成功responseを観測anchorとし、対応anchorから5000 ms以上を経過させた後、checkpoint内で利用中の各projectionへ明示的final snapshot commandを送る。DirectAccessがactiveならDirectAccessを最初に完了し、同期`update()`が生むfeedbackもその完了前に収め、その後に必要なbank projectionを送る。最初のfinal snapshot完了後は、後続する同じsetの明示的snapshot request / response / chunk以外のprobe messageやhost callbackを許さない。set最後のresponse / 全chunk完了後から`end`までもprobe messageもhost callbackも1件もない状態で1000 ms以上quietを満たし、UI annotationを完了してからだけ`end`を送る。set途中または最後のsnapshot後に予期しないmessageが届いたrunは、quiet timerだけを再開して成功扱いにしない。
 - 5000 ms未満の`end`、対応しないID、開いたcheckpointを残したEOFはfatalとする。
 - 初期load、reload、restartを含むProbe観測も専用checkpointで囲む。期待していないProbe recordがcheckpoint外または終了後に届いた場合はorphanとして記録し、そのsequenceを成功にしない。
@@ -617,6 +618,7 @@ Issue #4へ方式を提案するには、候補が公開しようとするscope�
 - [ ] fixture revision 2のE0 / E1 / E8 / C1 / M1、R1 / R2を再現し、audit v1のO1は`skipped / not_separately_authorized`にした
 - [ ] C13 Mixer Bankのphysical runと、C15 Mixer Bank / DirectAccessを同時取得した単一physical runの完全な観測tableがある
 - [ ] 各profileのexactly 44 checkpointについて、cut対象では成功response直後のatomic pairに同request / epochの自動action markerがあり、manual markerを重ねず、その直後にUI操作を行い、種別ごとの観測anchorから5000 ms以上の観測、明示的final snapshot、その後にmessageがない追加1000 ms quiet period、UI annotation、sequence gap判定を適用した
+- [ ] 各UI操作の前後でsemantic targetまたは直前の座標targetとground truthを再確認し、別operator入力、focus / window移動、対象外への作用、または誤clickの疑いがあるrunを成功扱いしていない
 - [ ] redacted reportがraw run IDの`run-<16-hex>` alias、raw / manifest digest、allowlist済みsemantic projection、run-local ID aliasを含み、raw run ID / raw host ID / path / port / unknown titleを含まない
 - [ ] 同名、Unicode、長い名前、hidden、Folder、複数type、bank幅超過をUI ground truthと比較した
 - [ ] add / rename / delete / selection / mute / solo / visibility / project切替を個別windowで観測した

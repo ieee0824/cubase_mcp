@@ -334,6 +334,8 @@ INIT終了まで別projectを開かず、同じsourceからexactly 1回の完全
 
 INIT終了後にexact ID `E0`を開始し、`probe.observation.cut`の成功responseと隣接する自動action markerを確認した直後に、bootstrapとは別fileの正式な`CMCP_TrackFixture_Empty.cpr`を開きます。Project windowでbasenameが`CMCP_TrackFixture_Empty`であり、Project Trackが0本であることを目視確認できた場合だけ、E0 annotationの`action_confirmed`と`ui_ground_truth_confirmed`を`true`にします。project切替によりsame-source reactivationが発生した場合は前段落のexactly 1 sequenceと再discoverをE0内で完了します。E0内の新しい`probe.loaded`、partialまたは複数のreactivation、正式E0を開かなかった状態、basenameまたは0本を確認できない状態はrun invalidです。
 
+UI操作は対象Cubase instanceへの排他的な入力として実施します。可能な場合は現在のmouse pointer位置に依存する座標ではなく、直前に再取得したsemanticなwindow / dialog / control identityを使います。座標操作しか使えない場合は、操作直前にactive application、window、project basename、dialog、対象controlの位置を再取得し、その状態が直前の確認から変わっていない場合だけ1回実行します。各操作直後に同じUI surfaceを再取得し、期待したproject、selection、control値、visibilityまたはdialog遷移を確認します。別operatorのmouse / keyboard入力、focus移動、window移動、対象外controlの変化、予期しないcallback、または誤clickの可能性を検出した場合は、意図した座標から成功を推測せず、そのannotationを`action_confirmed = false` / `ui_ground_truth_confirmed = false`のままrunを停止します。同じcheckpoint内でclickをやり直して成功へ戻しません。pointer移動そのものを観測できない実装では、操作前後のUI状態とProbe差分によって作用先を検証し、それでも一意に確認できなければrun invalidです。
+
 各checkpointでは次の順序を固定します。
 
 1. checkpointを開始する。
@@ -595,6 +597,7 @@ redacted reportでは最後の監査対象snapshotごとに、Mixer Bank slot順
 - [ ] event、part、automation、imported mediaがない
 - [ ] 8-slot bankを超えるTrack数がある
 - [ ] 全44 checkpointでexactly 1 action markerを記録し、cut対象21 checkpointでは成功response直後のatomic output pairに同request / epochの自動markerがあり、別のmanual markerを送らず、そのmarker直後にUI操作を行い、checkpoint種別ごとの観測anchorから5000 ms以上後に各access projectionの明示的final snapshotを取得した
+- [ ] 各UI操作の直前と直後にtarget identityとground truthを再取得し、別operator入力、focus / window移動、対象外への作用、または誤clickの疑いがあるcheckpointを再試行や成功推測で救済していない
 - [ ] final snapshot完了後にprobe messageが1件もなく、追加1000 msのquiet periodを満たした
 - [ ] Mixer Bank configでchannel typeとleft / right zoneを明示し、main filter capabilityとimplicit / explicit scopeを記録した
 - [ ] Mixer Bank completenessはcore MixConsole channelに限定し、DirectAccessの`scope_complete`をhost graph completeへ拡張せず、Project-wide Folder completenessは未証明として残した

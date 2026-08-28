@@ -66,7 +66,7 @@ Cubase edition、runtimeが実際にloadしたAPI、run日時、About画面の�
 | Mixer Bank API | 存在 | `PENDING` | v1.1と同じcallback・終端挙動を保証しない |
 | MixerBankChannel / SelectedTrackChannelのunique ID getter | 存在 | `PENDING` | rename、project切替、reload、restartをまたぐ寿命を保証しない |
 | DirectAccess activate / update / deactivate | 存在 | `PENDING` | lifecycle中のready条件を保証しない |
-| base object、child count、child object IDによるtree走査 | 存在 | `PENDING` | Project Track全体を重複・欠落なく返すことを保証しない |
+| base object、child count、child object IDによるgraph走査 | 存在 | `PENDING` | Project Track全体をunique nodeとrepeat edgeへ分離して欠落なく返すことを保証しない |
 | object unique name getter | 存在 | `NOT_INVOKED_PRIVACY` | ambient host文字列をraw化しないためruntime値・例外・寿命は意図的に未観測 |
 | object unique ID / title | 存在 | `PENDING_FIXTURE_SCOPE` | allowlist済みfixture node以外のraw値は収集せず、各値の必須性、長さ、寿命を一般化しない |
 | mixer visibility / index / zone | 存在 | `PENDING` | Project順やhidden Trackのinclusionを保証しない |
@@ -124,7 +124,7 @@ Probe / collectorのrepository内artifactとoffline commandは次で固定しま
 | collector binary SHA-256 | run開始時に実行するrelease binaryから取得 | `PENDING_RUNTIME` |
 | repository commit | run開始時の40桁commit SHA | `PENDING_RUNTIME` |
 
-Track Probeはcollectorへ渡す前にsource-side data minimizationを行います。revision 2の固定fixture allowlistへ一致するtitleと、それに属するopaque host IDだけをraw frameへ許可し、それ以外のbank / DirectAccess nodeはtitleとhost IDを`null`へして明示的redaction flag / 件数だけを送ります。P09は固定80文字のprefixかつ予約marker `CMCP_09_LONG_`全体を含む場合だけfixture扱いします。DirectAccessのobject unique name getterはambient文字列を取得しないよう意図的に呼び出さず、fixed allowlist外のtype名とhost exception textも送信前にredactまたは固定code化します。tree位置、親子関係、安全なboolean / numeric metadataはscope差を観測するため保持します。runtime capabilityの固定`data_minimization`契約とartifact digestが一致しないrunを開始しません。
+Track Probeはcollectorへ渡す前にsource-side data minimizationを行います。revision 2の固定fixture allowlistへ一致するtitleと、それに属するopaque host IDだけをraw frameへ許可し、それ以外のbank / DirectAccess nodeはtitleとhost IDを`null`へして明示的redaction flag / 件数だけを送ります。P09は固定80文字のprefixかつ予約marker `CMCP_09_LONG_`全体を含む場合だけfixture扱いします。DirectAccessのobject unique name getterはambient文字列を取得しないよう意図的に呼び出さず、fixed allowlist外のtype名とhost exception textも送信前にredactまたは固定code化します。unique nodeのspanning-tree位置、再訪辺、親子関係、安全なboolean / numeric metadataはscope差を観測するため保持します。runtime capabilityの固定`data_minimization`契約とartifact digestが一致しないrunを開始しません。
 
 offline validationはrepository rootで次をすべて実行します。
 
@@ -191,7 +191,7 @@ checkpoint_id
 message.type
 message.event / message.id
 message.data
-bank config / slot index または DirectAccess tree位置
+bank config / slot index または DirectAccess graph位置・再訪辺
 host_id_raw                # local raw JSONLのみ
 host_id_byte_length
 returned title / type / selected / mute / solo / visibility
@@ -258,6 +258,14 @@ targeted requestは、同じrequest IDに対する同じ`source_instance_id`か�
 
 `probe.bank.chunk` / `probe.direct_access.chunk`は`source_instance_id + snapshot_id`単位で、chunk count、0始まりの連続index、total item数、complete flagを検査します。fragment化されたhost IDもreference、fragment count / index、UTF-8 byte lengthを検査します。欠落、重複、逆順、不整合、未完snapshot / fragment / requestを残したEOFはrun fatalです。collectorはEOF後も設定されたdrain期限まで受信を続け、quiescentにならないrunを成功にしません。
 
+DirectAccess snapshotは単純なtreeではなく、**unique-node spanning tree + explicit repeat-edge records**として表現します。初回観測したobjectだけを`record_kind = "observation"`としてexactly once出力し、既観測objectへ戻る辺も捨てず、`record_kind = "object_reference"`として記録します。referenceのexact fieldは`record_kind`、`observation_epoch`、`observation_epoch_status`、targetの`object_id`、sourceの`parent_id`、`child_index`、出現`depth`、`target_observation_index`、`reference_kind`です。`target_observation_index`はwire item indexではなく、targetを最初に出力した0始まりのobservation ordinalで、必ずreferenceより前に存在し、そのobservationの`object_id`と一致させます。targetがsource自身を含むactive ancestor chainにある辺は`ancestor_cycle`、chain外の既観測targetは`shared_reference`です。reference itemにはtitle、unique name、opaque host ID、自由形式type / error文字列を含めません。
+
+`observation_items == observation record数`、`reference_items == object_reference record数 == cycle_count + shared_reference_count`、`cycle_count == ancestor_cycle record数`、`shared_reference_count == shared_reference record数`を必須にします。`total_items == observation_items + reference_items + host_id_fragment record数`で、host-ID fragmentだけがsemantic itemとは別のwire itemです。nontruncated snapshotはsemantic recordが最大256件、depthが最大32、各objectのchild countが最大128で、depth 32のobjectはleafでなければなりません。expectedなcycle / shared referenceを全辺記録できたsnapshotは`truncated = false`かつ`truncation_reasons = []`であり、`snapshot_complete`はchunk転送の完了、graph completenessは別々に検証します。
+
+auditorは`base_object_id`と一致するroot observationがexactly 1件で、rootだけが`parent_id = null / depth = 0 / child_index = null`であることを確認します。host-ID fragmentを除くsemantic record列は、rootからchild index昇順に進むpreorder depth-first traversalとexactly一致させます。全non-root observationは先に存在する既知parentを持ち、`depth = parent.depth + 1`かつchild indexがparentの宣言範囲内でなければなりません。referenceもsource / targetが既知で、`target_observation_index < observation_items`、対応ordinalのtarget ID一致、referenceより先の初回観測を必須にします。observation辺とreference辺を合わせた`(parent_id, child_index)`は全体で一意で、各parentのchild index集合が`0..child_count-1`を完全に覆い、ancestor / shared分類もその時点のactive DFS ancestor stackと一致することを検証します。dangling edge、forward parent / target、preorder違反、duplicate coordinate、分類・count不一致、欠落child indexはfatalです。
+
+base / child enumeration getterの失敗、invalid child ID、depth・child・semantic-record上限等で新しいnodeまたは辺を取得できなかった場合だけ`truncated = true`にします。既知nodeのbounded metadata getter failureは`metadata_error_count`と固定codeで別に表し、それだけでgraph truncationへ変換しません。`cycle_count`だけを見てtruncationを許可したり、旧snapshotで欠落したrepeat edgeを後から推測して補ったりしません。`truncated = true`は理由を問わず従来どおりrun fatalで、修正版Probeとfresh collector / run IDによる再実施が必要です。
+
 `probe.overflow`はsource queue、outbound frame、host-ID fragment上限、snapshot queue、deactivation時の未drain feedbackまたは必須work破棄を含め、理由を問わずrun fatalです。唯一、same-script reactivationまたはrun内restart境界で、旧mappingのcallbackを全件送信済みかつ次の`page_activate` snapshotに置換されるcoalescedな非command DirectAccess change snapshotのcancelは未送信証拠の破棄として扱いません。明示command snapshot、`page_activate`、bank snapshot、未知reasonはこの例外へ含めません。raw logの`collector_summary`が`integrity_ok: true`かつ`exit_ok: true`でないrunを`OBSERVED`へ使いません。
 
 Cubaseは新しく現れたMIDI outputを検出するため、Universal Non-Realtime broadcast Identity Requestのexact 6 byte `F0 7E 7F 06 01 F7`を専用virtual portへ反復送信する場合があります。collectorはSysEx reassembly後、このexact frameだけをProbe transport外の標準検出trafficとしてingress / quiet-period計数前に無視します。device ID、Sub-ID、長さ、終端を含む1 byteでも異なるframeやその他のforeign SysExは従来どおりfatalです。この検出trafficをProbe message、callback不存在、source sequence、checkpoint activityの証拠へ数えません。
@@ -279,7 +287,7 @@ Cubaseは新しく現れたMIDI outputを検出するため、Universal Non-Real
 11. R1 reloadとR2 restartは独立phaseとして実施する。R1のpre-stateは`S9-baseline`、R2のpre-stateはR1の監査済みfinal snapshotを参照し、R1/R2内に追加のpre-action snapshot commandを送らない。
 12. active checkpointがなく、request / follow-up / snapshotがquiescentなことを確認してstdinをEOFにする。graceful drain後の`collector_summary`を確認する。
 13. gap、duplicate、逆順、overflow、orphan、未完request / chunk / fragment、truncation、fatal diagnosticが1件でもあれば、そのrunを完全性の証拠にしない。
-14. raw JSONLとaudit manifest v1をfail-closed auditorへ同時に入力し、必須coverageとredaction検査を通過させる。この文書にはredacted audit reportの集計と最小限の合成名例だけを転記し、raw JSONLを移動・copy・stageしない。
+14. raw JSONLとaudit manifest v1をfail-closed auditorへ同時に入力し、必須coverageとredaction検査を通過させる。この文書にはredacted audit report v2（`audit_report_version = 2`）の集計と最小限の合成名例だけを転記し、raw JSONLを移動・copy・stageしない。
 15. cleanup後、`git status --short`で意図したsource / document以外のartifactがないことを確認する。
 
 ## Callback観測windowとsequence判定
@@ -459,13 +467,13 @@ O1を将来実装するときは、別途明示的な許可、専用Probe build�
 
 ## Cubase 13.0.30 conditional DirectAccess projection
 
-INIT capabilityがDirectAccessを`supported: false, active: false`と報告し、固定のunavailable / incomplete reasonと整合した場合だけ、この節を`UNSUPPORTED_RUNTIME`として固定し、DA snapshotやeventを捏造しません。supported / activeだった場合は同じC13 physical runの全44 checkpointから作るprojectionをここへ記録し、後続のC15詳細表と同じlifecycle、tree、metadata、change callback項目を評価します。supportedだがinactive、activation error、または組合せ不整合はこの表へ`UNSUPPORTED`として記録せずrunを停止します。
+INIT capabilityがDirectAccessを`supported: false, active: false`と報告し、固定のunavailable / incomplete reasonと整合した場合だけ、この節を`UNSUPPORTED_RUNTIME`として固定し、DA snapshotやeventを捏造しません。supported / activeだった場合は同じC13 physical runの全44 checkpointから作るprojectionをここへ記録し、後続のC15詳細表と同じlifecycle、graph topology、metadata、change callback項目を評価します。supportedだがinactive、activation error、または組合せ不整合はこの表へ`UNSUPPORTED`として記録せずrunを停止します。
 
 | 項目 | 観測値 | result |
 | --- | --- | --- |
 | runtime capability summary | `PENDING` | `PENDING_CONDITIONAL` |
 | activation初期snapshot / ready順 | `PENDING` | `PENDING_CONDITIONAL` |
-| E0 / E1 / E8 / C1 tree scopeと順序 | `PENDING` | `PENDING_CONDITIONAL` |
+| E0 / E1 / E8 / C1 graph scope、spanning-tree順、repeat edge | `PENDING` | `PENDING_CONDITIONAL` |
 | unique ID / title / type等metadata | `PENDING` | `PENDING_CONDITIONAL` |
 | rename / add / delete / visibility / state callback | `PENDING` | `PENDING_CONDITIONAL` |
 | reload / restart後の回復とID寿命 | `PENDING` | `PENDING_CONDITIONAL` |
@@ -475,7 +483,7 @@ INIT capabilityがDirectAccessを`supported: false, active: false`と報告し�
 
 この節は同じC15-COMBINED physical runのDirectAccess projectionです。
 
-### Lifecycleとtree
+### Lifecycleとgraph topology
 
 | 項目 | 観測値 | result |
 | --- | --- | --- |
@@ -486,11 +494,11 @@ INIT capabilityがDirectAccessを`supported: false, active: false`と報告し�
 | E0 root / child count | `PENDING` | `PENDING` |
 | E1 root / child count /順序 | `PENDING` | `PENDING` |
 | E8 root / child count /順序 | `PENDING` | `PENDING` |
-| C1 treeのscope、深さ、順序 | `PENDING` | `PENDING` |
+| C1 graphのscope、深さ、spanning-tree順序 | `PENDING` | `PENDING` |
 | Folder / hidden / Group / FX inclusion | `PENDING` | `PENDING` |
 | Input / Output / VCA inclusion | `PENDING` | `PENDING` |
-| duplicate / cycle / invalid child ID | `PENDING` | `PENDING` |
-| tree走査の収束時間 | `PENDING` | `PENDING` |
+| duplicate observation / ancestor cycle / shared reference / invalid child ID | `PENDING` | `PENDING` |
+| graph走査の収束時間 | `PENDING` | `PENDING` |
 
 ### Metadata
 
@@ -508,7 +516,7 @@ INIT capabilityがDirectAccessを`supported: false, active: false`と報告し�
 
 ### Change callback
 
-| 操作 | object change | will-be-removed | tree / metadata再取得 | seq integrity | result |
+| 操作 | object change | will-be-removed | graph / metadata再取得 | seq integrity | result |
 | --- | --- | --- | --- | --- | --- |
 | rename | `PENDING` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
 | add | `PENDING` | `PENDING` | `PENDING` | `PENDING` | `PENDING` |
@@ -530,7 +538,7 @@ INIT capabilityがDirectAccessを`supported: false, active: false`と報告し�
 | S2-add | add、自動selection、後続index | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
 | S3-select-delete | P11単独selection | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
 | S3-delete | removal、自動selection、後続index | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
-| S4-show | hidden P08をshow、bank / tree差分 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
+| S4-show | hidden P08をshow、bank / graph差分 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
 | S5-select-anchor | P12比較元selection | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
 | S5-select-change | P12 false / P13 trueの順 | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
 | S6-mute | P04 muteと意図しないselection | `PENDING` | `PENDING_CONDITIONAL` | `PENDING` | `PENDING` |
@@ -603,7 +611,7 @@ Issue #4へ方式を提案するには、候補が次のgateをすべて満た�
 - [ ] redacted reportがraw run IDの`run-<16-hex>` alias、raw / manifest digest、allowlist済みsemantic projection、run-local ID aliasを含み、raw run ID / raw host ID / path / port / unknown titleを含まない
 - [ ] 同名、Unicode、長い名前、hidden、Folder、複数type、bank幅超過をUI ground truthと比較した
 - [ ] add / rename / delete / selection / mute / solo / visibility / project切替を個別windowで観測した
-- [ ] ID寿命、callback順、空slot、bank終端、tree scopeを観測値と未確認事項に分けた
+- [ ] ID寿命、callback順、空slot、bank終端、graph scope / repeat edgeを観測値と未確認事項に分けた
 - [ ] Mixer BankとDirectAccessの制約を比較した
 - [ ] 完全性を保証できない項目を`PENDING`、`NOT_AVAILABLE`、`UNSUPPORTED`、`INCONCLUSIVE_*`から適切に分類した
 - [ ] 推奨方式とfallback方針を上のgateから導出した

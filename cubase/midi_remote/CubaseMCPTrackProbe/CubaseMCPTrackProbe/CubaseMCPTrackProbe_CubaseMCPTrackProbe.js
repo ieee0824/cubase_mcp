@@ -1053,7 +1053,10 @@ function flushOneDirectAccessSnapshot(activeDevice, activeMapping) {
             base_object_id: result.base_object_id,
             observation_epoch: result.observation_epoch,
             observation_epoch_status: result.observation_epoch_status,
+            observation_items: result.observation_items,
+            reference_items: result.reference_items,
             cycle_count: result.cycle_count,
+            shared_reference_count: result.shared_reference_count,
             error_count: result.error_count,
             truncation_reasons: result.truncation_reasons
         }
@@ -1067,7 +1070,10 @@ function collectDirectAccess(activeMapping) {
         items: [],
         observation_epoch: snapshotEpoch,
         observation_epoch_status: 'snapshot_observed',
+        observation_items: 0,
+        reference_items: 0,
         cycle_count: 0,
+        shared_reference_count: 0,
         error_count: 0,
         truncated: false,
         truncation_reasons: []
@@ -1091,29 +1097,62 @@ function collectDirectAccess(activeMapping) {
     }
 
     result.base_object_id = baseObjectId
-    var stack = [{ object_id: baseObjectId, parent_id: null, depth: 0, child_index: null }]
+    var stack = [{
+        frame_kind: 'enter',
+        object_id: baseObjectId,
+        parent_id: null,
+        depth: 0,
+        child_index: null
+    }]
     var visited = {}
+    var activeAncestors = {}
 
-    while (stack.length > 0 && result.items.length < MAX_DIRECT_ACCESS_NODES) {
-        var entry = stack.pop()
-        var key = '$' + String(entry.object_id)
-        if (visited[key]) {
-            ++result.cycle_count
-            result.truncated = true
-            addUniqueReason(result.truncation_reasons, 'cycle_detected')
+    while (stack.length > 0) {
+        var frame = stack.pop()
+        if (frame.frame_kind === 'leave') {
+            delete activeAncestors[frame.object_key]
             continue
         }
-        visited[key] = true
+
+        if (result.items.length >= MAX_DIRECT_ACCESS_NODES) {
+            result.truncated = true
+            addUniqueReason(result.truncation_reasons, 'node_limit')
+            break
+        }
+
+        var entry = frame
+        var key = '$' + String(entry.object_id)
+        if (Object.prototype.hasOwnProperty.call(visited, key)) {
+            var referenceKind = 'shared_reference'
+            if (activeAncestors[key] === true) {
+                referenceKind = 'ancestor_cycle'
+                ++result.cycle_count
+            } else {
+                ++result.shared_reference_count
+            }
+            ++result.reference_items
+            result.items.push({
+                record_kind: 'object_reference',
+                observation_epoch: snapshotEpoch,
+                observation_epoch_status: 'snapshot_observed',
+                reference_kind: referenceKind,
+                object_id: entry.object_id,
+                parent_id: entry.parent_id,
+                depth: entry.depth,
+                child_index: entry.child_index,
+                target_observation_index: visited[key]
+            })
+            continue
+        }
+
+        visited[key] = result.observation_items
+        activeAncestors[key] = true
+        ++result.observation_items
 
         var item = readDirectAccessObject(activeMapping, entry, snapshotEpoch)
         result.error_count += item.metadata_error_count
         result.items.push(item)
-
-        if (entry.depth >= MAX_DIRECT_ACCESS_DEPTH) {
-            result.truncated = true
-            addUniqueReason(result.truncation_reasons, 'depth_limit')
-            continue
-        }
+        stack.push({ frame_kind: 'leave', object_key: key })
 
         var childCount = 0
         try {
@@ -1140,6 +1179,14 @@ function collectDirectAccess(activeMapping) {
         }
 
         item.child_count = childCount
+        if (entry.depth >= MAX_DIRECT_ACCESS_DEPTH) {
+            if (childCount > 0) {
+                result.truncated = true
+                addUniqueReason(result.truncation_reasons, 'depth_limit')
+            }
+            continue
+        }
+
         var visitedChildCount = childCount
         if (visitedChildCount > MAX_DIRECT_ACCESS_CHILDREN) {
             visitedChildCount = MAX_DIRECT_ACCESS_CHILDREN
@@ -1169,6 +1216,7 @@ function collectDirectAccess(activeMapping) {
                 continue
             }
             stack.push({
+                frame_kind: 'enter',
                 object_id: childObjectId,
                 parent_id: entry.object_id,
                 depth: entry.depth + 1,
@@ -1177,10 +1225,6 @@ function collectDirectAccess(activeMapping) {
         }
     }
 
-    if (stack.length > 0) {
-        result.truncated = true
-        addUniqueReason(result.truncation_reasons, 'node_limit')
-    }
     return result
 }
 
@@ -1727,7 +1771,9 @@ function sendChunkedEvent(
     var snapshotId = nextSnapshotId()
     var chunkExtra = {}
     copyOwnProperties(chunkExtra, extra)
-    chunkExtra.observation_items = items.length
+    if (!Object.prototype.hasOwnProperty.call(chunkExtra, 'observation_items')) {
+        chunkExtra.observation_items = items.length
+    }
     var expansion = expandHostIdsForWire(
         snapshotId,
         eventName,

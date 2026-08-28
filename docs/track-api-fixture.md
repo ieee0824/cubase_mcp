@@ -83,7 +83,7 @@ repositoryの`.gitignore`は`CMCP_TrackFixture_*`のproject / backup、`CMCP_Tra
 
 Cubase versionごとにfixtureを新規作成します。新しいCubaseで保存した`.cpr`をCubase 13で開いて使い回してはいけません。
 
-Cubase 15ではMixer Bank用とDirectAccess用にfixtureやrunを複製しません。1つのCubase instance、collector process、run ID、manifestで各caseを1回だけ操作し、同じcheckpointからMixer BankとDirectAccessの2 projectionを取得します。Cubase 13でもruntime feature detectionがDirectAccessを`supported: true, active: true`と報告した場合は同じ条件付きcombined契約を適用し、初期DirectAccess snapshotと全checkpointのDirectAccess final snapshotを省略しません。`supported: false, active: false`かつ固定のunavailable / incomplete reasonの場合だけMixer Bank単独とし、DirectAccess eventがないことを確認します。supportedだがinactive、activation error、または組合せ不整合はunsupportedへ丸めずrun invalidとします。API versionだけからどちらかを決め打ちしません。
+Cubase 15ではMixer Bank用とDirectAccess用にfixtureやrunを複製しません。1つのCubase instance、collector process、run ID、manifestで各caseを1回だけ操作し、同じcheckpointからMixer BankとDirectAccessの2 projectionを取得します。DirectAccessはhost objectを単純なtreeと仮定せず、unique nodeをexactly once記録するspanning treeと、既観測nodeへ戻る`ancestor_cycle` / `shared_reference`辺を別recordで完全に保持します。Cubase 13でもruntime feature detectionがDirectAccessを`supported: true, active: true`と報告した場合は同じ条件付きcombined契約を適用し、初期DirectAccess snapshotと全checkpointのDirectAccess final snapshotを省略しません。`supported: false, active: false`かつ固定のunavailable / incomplete reasonの場合だけMixer Bank単独とし、DirectAccess eventがないことを確認します。supportedだがinactive、activation error、または組合せ不整合はunsupportedへ丸めずrun invalidとします。API versionだけからどちらかを決め打ちしません。
 
 ## 作成するlocal project
 
@@ -401,7 +401,7 @@ R1/R2の`reconnect_deadline_ms`は既定`30000`とし、action markerから新se
 
 ## Case O1: Input / Output / VCA（任意）
 
-このcaseは将来の別profile用手順であり、audit manifest v1とprimary Track Probeでは実施できません。primary Probeは`MB_OPTIONAL_*` config自体を作成しません。DirectAccessはhost treeの構造上Input / Output / VCA等のnodeを通過し得ますが、固定fixture allowlist外のtitle、unique name、host ID、自由形式type / error文字列はProbe内でframe生成前にredactし、raw JSONLへ収集しません。安全なtree位置、親子関係、boolean / numeric値、固定type categoryとredaction件数だけをscope観測へ残します。v1 manifestは`optional_o1.status = "skipped"`と固定理由`not_separately_authorized`だけを受け付け、O1 projectを作成せず、以下の手順1以降を実行しません。
+このcaseは将来の別profile用手順であり、audit manifest v1とprimary Track Probeでは実施できません。primary Probeは`MB_OPTIONAL_*` config自体を作成しません。DirectAccessはhost graphの構造上Input / Output / VCA等のnodeを通過し得ますが、固定fixture allowlist外のtitle、unique name、host ID、自由形式type / error文字列はProbe内でframe生成前にredactし、raw JSONLへ収集しません。安全なspanning-tree位置、explicit repeat edge、親子関係、boolean / numeric値、固定type categoryとredaction件数だけをscope観測へ残します。v1 manifestは`optional_o1.status = "skipped"`と固定理由`not_separately_authorized`だけを受け付け、O1 projectを作成せず、以下の手順1以降を実行しません。
 
 将来O1を実施する場合は、通常fixtureとは別の明示的な許可、O1専用Probe build / capability / audit profile、pre-run inventory、local UI記録、cleanup後の完全一致を先に定義します。primary 44-checkpoint runへoptional configを追加したり、manifestのstatusだけを`observed`へ変更したりしてはいけません。
 
@@ -423,7 +423,7 @@ R1/R2の`reconnect_deadline_ms`は既定`30000`とし、action markerから新se
 6. 実audio deviceへ接続していないことを確認する。
 7. O-P21 / O-I01 / O-O01の利用可能な行を表の状態にし、coreのstateと順序がC1から変わっていないことを確認する。
 8. O1を保存する。
-9. Project window、MixConsole、Mixer Bank zone、DirectAccess treeでそれぞれ存在と順序を記録する。DirectAccess非対応versionではそのaccess方式だけを`UNSUPPORTED`とする。
+9. Project window、MixConsole、Mixer Bank zone、DirectAccess graphでそれぞれ存在、spanning-tree順序、repeat edgeを記録する。DirectAccess非対応versionではそのaccess方式だけを`UNSUPPORTED`とする。
 10. Mixer Bankではzoneごとに次の3 configを使い、それぞれcoreのB0〜B5と同じ固定sequenceおよびCallback観測windowを適用する。3 configの結果を連結して単一のcross-zone順序を推測しない。
 
 全configでwidthは`8`、include typeはVCA / Input / Output、exclude typeはAudio / Instrument / Sampler / MIDI / Group / FX、followVisibilityは`false`です。
@@ -458,7 +458,7 @@ runtime evidenceは、用途の異なる次の3 artifactを混ぜません。
 
 1. **raw collector JSONL v1**: collectorがstdoutへflushするmachine event stream。repository外に保持し、callback、request / response、chunk、raw host ID、checkpoint markerを受信順のまま含む。fixture revision、UI確認、host version、実施許可を各raw recordへ後付けしたり、UI値でhost payloadを補完したりしない。
 2. **audit manifest v1 / UI annotation sidecar**: operatorがrun前にtemplateを用意し、最初のraw recordと各checkpointの確認後に完成させるversioned JSON。raw JSONLと同じ`run_id`を持ち、環境・digest・期待profile・UI ground truth確認を結び付ける。raw host ID、MIDI port名、absolute path、device名を含めない。
-3. **redacted audit report**: fail-closed auditorがraw JSONLとmanifestを両方検証して生成する共有可能な集計。raw `run_id`をechoせず、そのSHA-256先頭16 hexから作る`run-<16-hex>` alias、両inputのSHA-256、環境・artifact digest、checkpointごとのfinal snapshot projectionを含む。通常titleとP05はfixture revision 2の固定allowlistへexact一致した値だけ、P09は予約marker `CMCP_09_LONG_`全体を含む固定80文字のprefix policyへ一致した値だけを出し、host IDはrun-local aliasだけを出力する。それ以外の文字列は分類と件数へredactする。repositoryへ転記できるのは、この検証を通過し、別途secret / path確認を終えたreportの最小部分だけである。
+3. **redacted audit report v2**（`audit_report_version = 2`）: fail-closed auditorがraw JSONLとmanifestを両方検証して生成する共有可能な集計。raw `run_id`をechoせず、そのSHA-256先頭16 hexから作る`run-<16-hex>` alias、両inputのSHA-256、環境・artifact digest、checkpointごとのfinal snapshot projectionを含む。通常titleとP05はfixture revision 2の固定allowlistへexact一致した値だけ、P09は予約marker `CMCP_09_LONG_`全体を含む固定80文字のprefix policyへ一致した値だけを出し、host IDはrun-local aliasだけを出力する。それ以外の文字列は分類と件数へredactする。repositoryへ転記できるのは、この検証を通過し、別途secret / path確認を終えたreportの最小部分だけである。
 
 raw JSONL単独の`collector_summary.exit_ok`は通信integrityだけを表し、fixture coverage、UI ground truth、exact host、digest一致、O1許可を証明しません。manifest単独も、実際のcallback、final snapshot、時間window、sequence integrityを証明しません。どちらか一方しかないrunを`OBSERVED`へ使いません。
 
@@ -565,7 +565,7 @@ profile名はcheckpoint IDへ重ねて付けず、manifestの`profile`でnamespa
 
 APIが提供しないfieldはraw logとredacted reportの双方で`null`または`not available`とし、直前値で埋めません。callbackの受信順を保ち、同一timestampへ並べ替えません。raw host IDはlocal JSONLから外へ出さず、redacted reportではrun-local alias、byte length、必要な場合だけSHA-256 digestで同一性を表現します。名前、index、typeからIDを生成してはいけません。
 
-redacted reportでは最後の監査対象snapshotごとに、slot / tree順、allowlistへ一致した合成title、nullable state、run-local host ID alias、missing、duplicate、scope外またはunknown / redacted件数を別々に集計します。Mixer Bank callback値はProbeがcallback発生時に刻んだfield別`observation_epoch`がそのcheckpointのcut responseと一致した場合だけ`fresh`とし、cut前のqueueが後からflushされても`fresh`へ繰り上げません。旧epochや未観測のfieldは`stale` / `not available`として値を`null`にし、source側redactionとは別に集計します。DirectAccessのcallbackとlive snapshotも各recordのepoch / statusを検証します。raw JSONL / manifestのSHA-256で同じrunへ固定し、同じ環境の別runで穴埋めしません。`UNSUPPORTED`とtimeout等による`INCONCLUSIVE`を`PASS`へ含めません。snapshot内容が期待と異なっても証拠stream自体が完全ならauditorのmachine-readable integrity `status`は`evidence_valid`、`semantic_assessment`は`observed_not_evaluated`になり得ますが、semantic projectionの差分を隠して機能上の`PASS`へ読み替えてはいけません。
+redacted reportでは最後の監査対象snapshotごとに、slot / DirectAccess spanning-tree順、allowlistへ一致した合成title、nullable state、run-local host ID alias、missing、duplicate、scope外またはunknown / redacted件数を別々に集計します。DirectAccessのrepeat edgeはsource / targetのrun-local object alias、child index、depth、`ancestor_cycle` / `shared_reference`分類だけを出し、raw numeric object IDやambient文字列を共有しません。`observation_items`はunique node、`reference_items`はrepeat edgeとして別集計し、全parentのchild indexがobservation辺とreference辺で完全に覆われた場合だけgraphをcompleteとします。Mixer Bank callback値はProbeがcallback発生時に刻んだfield別`observation_epoch`がそのcheckpointのcut responseと一致した場合だけ`fresh`とし、cut前のqueueが後からflushされても`fresh`へ繰り上げません。旧epochや未観測のfieldは`stale` / `not available`として値を`null`にし、source側redactionとは別に集計します。DirectAccessのcallbackとlive snapshotも各recordのepoch / statusを検証します。raw JSONL / manifestのSHA-256で同じrunへ固定し、同じ環境の別runで穴埋めしません。`UNSUPPORTED`とtimeout等による`INCONCLUSIVE`を`PASS`へ含めません。snapshot内容が期待と異なっても証拠stream自体が完全ならauditorのmachine-readable integrity `status`は`evidence_valid`、`semantic_assessment`は`observed_not_evaluated`になり得ますが、semantic projectionの差分を隠して機能上の`PASS`へ読み替えてはいけません。
 
 ## 再現性チェックリスト
 
@@ -573,6 +573,7 @@ redacted reportでは最後の監査対象snapshotごとに、slot / tree順、a
 
 - [ ] run情報に正確なOS、Cubase version/build、MIDI Remote APIを記録した
 - [ ] audit manifest v1の`fixture_revision`が`2`で、raw JSONLと`run_id`が一致する
+- [ ] DirectAccessがactiveなら、unique observationとexplicit referenceを分離し、root / non-root observation、child index昇順のexact preorder DFS、target ordinalの先行、active-ancestor/shared reference分類、全count式、全parentのchild index完全性をauditorが検証した
 - [ ] 対象versionで新規作成したINIT bootstrapが正式E0とは別fileで、0 Project Trackかつmedia、event、part、automation、plug-in、user preset、新しいrouting設定を持たず、run前SHA-256をlocalに固定した
 - [ ] exactなCubase application名またはbundle pathとbootstrap absolute pathをrun前にlocalで確定し、INIT action直後の同じOS launch操作へ両方をquoteして指定した。Hub先行起動やprimary INIT中のbootstrap後付け救済を行っていない
 - [ ] INIT annotationはexact bootstrap basename、0 Project Track、他projectなし、dirty / modified表示なしをUI確認しており、full lifecycleがexactly 1回で、追加loaded、ready(false)、2回目のmapping / capability / page-activate snapshot set / ready、別source activationがない

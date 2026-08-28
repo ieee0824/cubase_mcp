@@ -853,6 +853,7 @@ fn validate_manifest(manifest: &AuditManifest) -> AuditResult<()> {
 
     let required: HashSet<_> = REQUIRED_CHECKPOINTS.into_iter().collect();
     let mut observed = HashSet::new();
+    let mut observed_order = Vec::with_capacity(manifest.annotations.len());
     for annotation in &manifest.annotations {
         let Some(required_id) = canonical_checkpoint_id(&annotation.checkpoint_id) else {
             return Err(AuditError::new("ANNOTATION_CHECKPOINT_UNEXPECTED"));
@@ -860,6 +861,7 @@ fn validate_manifest(manifest: &AuditManifest) -> AuditResult<()> {
         if !observed.insert(required_id) {
             return Err(AuditError::new("ANNOTATION_CHECKPOINT_DUPLICATE"));
         }
+        observed_order.push(required_id);
         if annotation.result != AnnotationResult::Observed
             || !annotation.ui_ground_truth_confirmed
             || !annotation.action_confirmed
@@ -869,6 +871,9 @@ fn validate_manifest(manifest: &AuditManifest) -> AuditResult<()> {
     }
     if observed != required {
         return Err(AuditError::new("ANNOTATION_CHECKPOINT_MISSING"));
+    }
+    if observed_order.as_slice() != REQUIRED_CHECKPOINTS {
+        return Err(AuditError::new("ANNOTATION_CHECKPOINT_ORDER_INVALID"));
     }
 
     Ok(())
@@ -9439,6 +9444,37 @@ mod tests {
         assert_eq!(
             audit_artifact(&invalid_revision).unwrap_err().code,
             "FIXTURE_REVISION_INVALID"
+        );
+    }
+
+    #[test]
+    fn manifest_annotations_must_follow_checkpoint_order() {
+        let mut reordered = valid_artifact(Profile::C13MixerBank);
+        reordered.manifest["annotations"]
+            .as_array_mut()
+            .unwrap()
+            .swap(0, 1);
+        assert_eq!(
+            audit_artifact(&reordered).unwrap_err().code,
+            "ANNOTATION_CHECKPOINT_ORDER_INVALID"
+        );
+
+        let mut missing = valid_artifact(Profile::C13MixerBank);
+        missing.manifest["annotations"]
+            .as_array_mut()
+            .unwrap()
+            .remove(1);
+        assert_eq!(
+            audit_artifact(&missing).unwrap_err().code,
+            "ANNOTATION_CHECKPOINT_MISSING"
+        );
+
+        let mut duplicate = valid_artifact(Profile::C13MixerBank);
+        let first = duplicate.manifest["annotations"][0].clone();
+        duplicate.manifest["annotations"][1] = first;
+        assert_eq!(
+            audit_artifact(&duplicate).unwrap_err().code,
+            "ANNOTATION_CHECKPOINT_DUPLICATE"
         );
     }
 

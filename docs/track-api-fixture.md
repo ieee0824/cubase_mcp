@@ -336,6 +336,16 @@ INIT終了後にexact ID `E0`を開始し、`probe.observation.cut`の成功resp
 
 UI操作は対象Cubase instanceへの排他的な入力として実施します。可能な場合は現在のmouse pointer位置に依存する座標ではなく、直前に再取得したsemanticなwindow / dialog / control identityを使います。座標操作しか使えない場合は、操作直前にactive application、window、project basename、dialog、対象controlの位置を再取得し、その状態が直前の確認から変わっていない場合だけ1回実行します。現在のpointerを対象へ移動してから別操作でclickする2段階入力は禁止し、直前のwindow screenshotへ束縛された絶対座標clickを単一操作として送ります。clickを取得済みwindowへ束縛できない実装や、別operatorのpointer移動で作用先が変わり得る実装は座標操作へ使用しません。各操作直後に同じUI surfaceを再取得し、期待したproject、selection、control値、visibilityまたはdialog遷移を確認します。別operatorのmouse / keyboard入力、focus移動、window移動、対象外controlの変化、予期しないcallback、または誤clickの可能性を検出した場合は、意図した座標から成功を推測せず、そのannotationを`action_confirmed = false` / `ui_ground_truth_confirmed = false`のままrunを停止します。同じcheckpoint内でclickをやり直して成功へ戻しません。pointer移動そのものを観測できない実装では、操作前後のUI状態とProbe差分によって作用先を検証し、それでも一意に確認できなければrun invalidです。
 
+macOSのprimary runでは`cubase_input_guard`をcollectorより先に起動し、`source = hid_system_state`、`coverage = session_wide`の`ready`を確認します。このsidecarはWindow Serverが保持する物理HID eventの累積countと、通常keyまたはmouse buttonが押下中かというaggregate booleanだけを読みます。どのkey code / buttonだったかを保持・serialize・logせず、入力文字、pointer座標、対象applicationも取得しません。startup sampleから前回command sampleまでの差分を全commandで継続検査するため、UI操作区間だけでなくcheckpoint間、callback window、final snapshot、drain中の物理入力も次のcommandでlatchします。各UI操作では、freshなpre-stateを取得する**前**に`arm`し、単一のUI操作とfreshなpost-state確認を終えた直後に同じ`action_id`で`check`します。collectorの正常summaryを確認した後にだけ`finish`を送り、`interference_detected = false`の`finished`を確認します。`interference_detected = true`、`cancelled`、guard protocol error、process終了、action ID不一致、明示的`finish`なしのEOF、またはarmedのままの`finish`は、その作用先をUIで推測できる場合でもrun invalidです。guardを途中で再起動してcounter区間を継ぎ足しません。
+
+```json
+{"command":"arm","action_id":"S3-delete"}
+{"command":"check","action_id":"S3-delete"}
+{"command":"finish"}
+```
+
+`hid_system_state`はWindow Serverの物理hardware-source stateです。formal runのexactなautomation / launch contextごとに、操作を送った区間で個別HID event countの増分が0となるnegative controlと、物理mouseまたはkeyboard入力で増分が1以上となるpositive controlをscratch surface上で先に確認します。各sampleはaggregate counterの直前 / 直後値で読取り区間を括りますが、このaggregateはautomationでも増加し得るためsession差分の判定値には使わず、単一sample中の競合検出だけに限定します。counter取得が`2000 ms`以内に完了しない、sample中にaggregateが変化する、通常keyまたはmouse buttonが押下されたまま、controlを再現できない、またはautomation自身が個別HID event countを増加させる環境ではguardを利用可能と推測せずprimary runを開始しません。CoreGraphicsはkey autorepeatをcountしないため、押下中keyを拒否するpreconditionを省略しません。volume / brightness等の一部special hardware keyやsoftware remote control、通知、Cubase自身によるfocus / window変更は物理HID countだけでは検出できないため、input guardは前後のsemantic target / screenshot / Probe差分確認を置き換えず、両方を満たした場合だけannotationをtrueにします。guard JSONL、guard binaryのSHA-256、exact-contextのnegative / positive control結果はrepository外のlocal operator recordとして保持し、raw Probe JSONLやmanifest v1へ混入させません。audit manifest v1とauditorはguard artifactを入力に取らないため、redacted audit report v2だけからguard使用を証明したと主張しません。
+
 各checkpointでは次の順序を固定します。
 
 1. checkpointを開始する。

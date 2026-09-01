@@ -250,7 +250,7 @@ Track作成後、Cubase UIが実際に受理したP05/P09の文字列、Unicode 
 10. P08がVisibility listには残り、Project windowと対象MixConsoleでは非表示であることを確認する。primary runではseparate MixConsoleと利用可能な同期toggleが必須であり、toggleを利用できない場合はここでprimary auditを停止する。Project-onlyまたはlower-zoneだけの結果は別のsupplemental runとして扱い、44-checkpoint primary evidenceへ流用しない。lower-zoneの同期状態はtoggleを持たないため`UNSUPPORTED`ではなく`automatic`と記録する。
 11. `CMCP_TrackFixture_Core_Baseline.cpr`を保存して閉じ、再度開いて状態が復元されることを確認する。
 
-Soloによって他channelが聴感上muteされても、実機ログでは表の明示的なMute / Solo control値とeffective audio stateを混同しません。
+Soloによって他channelが聴感上muteされても、実機ログでは表の明示的なMute / Solo control値とeffective audio stateを混同しません。activeなSoloがある間、non-Solo channelのMixConsole上のMute表示とMixer Bankの`mValue.mMute`はSolo由来のeffective muteを表し、明示的なMute control値と区別できない場合があります。その状態でMute controlを操作した結果も明示Muteへの変更と決め付けず、Mute / Soloの両controlとcallbackを実測します。
 
 ### bank幅を超える条件
 
@@ -334,7 +334,7 @@ INIT終了まで別projectを開かず、同じsourceからexactly 1回の完全
 
 INIT終了後にexact ID `E0`を開始し、`probe.observation.cut`の成功responseと隣接する自動action markerを確認した直後に、bootstrapとは別fileの正式な`CMCP_TrackFixture_Empty.cpr`を開きます。Project windowでbasenameが`CMCP_TrackFixture_Empty`であり、Project Trackが0本であることを目視確認できた場合だけ、E0 annotationの`action_confirmed`と`ui_ground_truth_confirmed`を`true`にします。project切替によりsame-source reactivationが発生した場合は前段落のexactly 1 sequenceと再discoverをE0内で完了します。E0内の新しい`probe.loaded`、partialまたは複数のreactivation、正式E0を開かなかった状態、basenameまたは0本を確認できない状態はrun invalidです。
 
-UI操作は対象Cubase instanceへの排他的な入力として実施します。可能な場合は現在のmouse pointer位置に依存する座標ではなく、直前に再取得したsemanticなwindow / dialog / control identityを使います。座標操作しか使えない場合は、操作直前にactive application、window、project basename、dialog、対象controlの位置を再取得し、その状態が直前の確認から変わっていない場合だけ1回実行します。各操作直後に同じUI surfaceを再取得し、期待したproject、selection、control値、visibilityまたはdialog遷移を確認します。別operatorのmouse / keyboard入力、focus移動、window移動、対象外controlの変化、予期しないcallback、または誤clickの可能性を検出した場合は、意図した座標から成功を推測せず、そのannotationを`action_confirmed = false` / `ui_ground_truth_confirmed = false`のままrunを停止します。同じcheckpoint内でclickをやり直して成功へ戻しません。pointer移動そのものを観測できない実装では、操作前後のUI状態とProbe差分によって作用先を検証し、それでも一意に確認できなければrun invalidです。
+UI操作は対象Cubase instanceへの排他的な入力として実施します。可能な場合は現在のmouse pointer位置に依存する座標ではなく、直前に再取得したsemanticなwindow / dialog / control identityを使います。座標操作しか使えない場合は、操作直前にactive application、window、project basename、dialog、対象controlの位置を再取得し、その状態が直前の確認から変わっていない場合だけ1回実行します。現在のpointerを対象へ移動してから別操作でclickする2段階入力は禁止し、直前のwindow screenshotへ束縛された絶対座標clickを単一操作として送ります。clickを取得済みwindowへ束縛できない実装や、別operatorのpointer移動で作用先が変わり得る実装は座標操作へ使用しません。各操作直後に同じUI surfaceを再取得し、期待したproject、selection、control値、visibilityまたはdialog遷移を確認します。別operatorのmouse / keyboard入力、focus移動、window移動、対象外controlの変化、予期しないcallback、または誤clickの可能性を検出した場合は、意図した座標から成功を推測せず、そのannotationを`action_confirmed = false` / `ui_ground_truth_confirmed = false`のままrunを停止します。同じcheckpoint内でclickをやり直して成功へ戻しません。pointer移動そのものを観測できない実装では、操作前後のUI状態とProbe差分によって作用先を検証し、それでも一意に確認できなければrun invalidです。
 
 各checkpointでは次の順序を固定します。
 
@@ -343,7 +343,7 @@ UI操作は対象Cubase instanceへの排他的な入力として実施します
 3. 上記の観測anchorから`5000 ms`以上を経過させる。cut checkpointではaction markerより前のcut待ち時間を、navigationでは操作responseより前の待ち時間をwindowへ算入せず、途中でquietになっても短縮しない。
 4. checkpointを閉じる前に明示的なfinal snapshot commandを送る。C15、またはC13でruntime capabilityがDirectAccessをsupported / activeと報告したrunでは、最初に`probe.direct_access.snapshot`を取得し、response、同期`update()`から生じ得るfeedback、全chunkの完了まで待つ。その後、E8 / C1のbank navigation checkpointは操作したconfigの`probe.bank.snapshot`を1回取得し、それ以外は`MB_CORE_ALL`、続けて`MB_CORE_VISIBLE`を取得する。DirectAccessが固定のunsupported分岐であるrunでは同じbank snapshotだけを同じ順で取得する。自動初期snapshot、操作直後のcallback、または直前checkpointのsnapshotをfinal snapshotの代用にしない。
 5. final snapshot setの最初のsnapshotが完了した後は、後続する同じsetの明示的snapshot request / response / chunk以外のprobe messageやhost callbackを1件も許さない。DirectAccess `update()`の同期feedbackは最初のDirectAccess snapshot完了前にだけ許され、完了後へ持ち越さない。set最後のresponse / chunkを受信してからは、probe messageもhost callbackもない追加のquiet periodを連続`1000 ms`以上待つ。final snapshotがcollectorのlast-message clockを更新するため、snapshot完了直後にcheckpointを終了しない。set途中または最後のsnapshot後に予期しないmessageが1件でも届いた場合はsnapshotが同じUI状態を表さない、または古くなり得るため、quiet timerだけを再開して成功扱いにせず、そのrunを停止する。
-6. 文書で固定した期待状態とUI実測状態が一致したかを同じcheckpoint IDのannotationへ`result` / `ui_ground_truth_confirmed`として記録し、その後にだけcheckpointを終了する。個々の状態値は自由記述でsidecarへ複製せず、このrevisionの固定fixture表を期待値、boolean確認を実測照合結果とする。P05/P09の受理実値と代替plug-inだけは`fixture_acceptance`へ構造化して記録する。
+6. 文書で固定した期待状態とUI実測状態が一致したかを同じcheckpoint IDのannotationへ`result` / `ui_ground_truth_confirmed`として記録し、その後にだけcheckpointを終了する。個々の状態値は自由記述でsidecarへ複製せず、このrevisionの固定fixture表を期待値、boolean確認を実測照合結果とする。P05/P09の受理実値と代替plug-inだけは`fixture_acceptance`へ構造化して記録する。`S6-mute`の`action_confirmed = true`は指定したMute UI経路をexactly 1回実行したこと、`ui_ground_truth_confirmed = true`はpre / post UI状態を一意に確認したことだけを表し、Muteがtrueになったことや機能上のPASSを意味しない。状態を一意に確認できない場合は両値をtrueへせずrunを停止する。manifest v1はS6の結果カテゴリを保持しないため、explicit Mute on / no-op / Solo mappingの別はraw callback / projectionと監査後のredacted結果表に記録し、annotation booleanへ畳み込まない。
 
 Cubase 15、およびruntime capabilityがDirectAccessをsupported / activeと報告したCubase 13 runでは、同じUI操作と同じwindowに対してMixer BankとDirectAccessのfinal snapshotを両方取得します。一方だけのsnapshotから他方のprojectionを推測しません。次の条件をすべて満たした場合だけ次の操作へ進みます。
 
@@ -367,7 +367,7 @@ Cubase 15、およびruntime capabilityがDirectAccessをsupported / activeと�
 10. baselineのvisibility連動（separateは`on`、lower-zoneは`automatic`）のままTrack VisibilityでP08をshowし、`S4-show`を記録する。
 11. P12だけを選択し、`S5-select-anchor`を記録する。
 12. P13だけを選択し、P12からP13へのselection変更を`S5-select-change`として記録する。
-13. P04を意図的に選択せず、P04のMute controlをonにして`S6-mute`を記録する。UIがselectionも変更した場合は、その差分を同じcheckpointへ記録する。
+13. P03 / P14 / P16 / P18 / P20の明示Soloをonのまま維持し、P04を意図的に選択せず、run前に固定した1つのP04 Mute UI経路をexactly 1回実行して`S6-mute`を記録する。P04は明示Mute=false / Solo=falseから開始しますが、Solo由来のeffective mute中にこの操作が明示Muteをtrueにするとは事前仮定しません。操作前後のP04の明示Mute / Solo control、effective mute表示、Mixer Bank / DirectAccess callback、selection、他Trackへの影響をそのまま記録します。結果がexplicit Mute on、no-op、またはeffective unmuteからSoloへのmappingでも、補正や別経路での再試行をせず、そのpost-stateを以後のM1 ground truthとします。
 14. P03を意図的に選択せず、P03のSolo controlをoffにして`S7-solo`を記録する。UIがselectionも変更した場合は、その差分を同じcheckpointへ記録する。
 15. primary runではseparate MixConsoleと利用可能な`Sync Visibility of Project and MixConsole`を必須とする。同期をoffにし、P08をProject windowだけでhideして`S8-project-only-hide`を記録する。toggleを利用できないrunはprimary auditを停止し、lower-zoneだけの結果は別のsupplemental runとして扱う。
 16. separate MixConsoleの同期をonへ戻し、P08がProject windowとMixConsoleの両方でhiddenになるbaseline visibilityを復元して`S8-restore`を記録する。M1の保存も`S8-restore`のaction後・final snapshot前に完了し、保存に伴うcallbackを同checkpointへ含める。
@@ -390,7 +390,7 @@ Cubase 15、およびruntime capabilityがDirectAccessをsupported / activeと�
 | S4-show | P08を表示 | visibility追従有無、bank再配置 |
 | S5-select-anchor | P12だけをselectedへ変更 | 比較元selection callback |
 | S5-select-change | selectedをP12からP13へ変更 | selected callbackのfalse / true順 |
-| S6-mute | P04 Muteをfalseからtrueへ変更 | mute callback、意図しないselection、他Trackへの影響 |
+| S6-mute | Project inventory不変。active Solo中のP04 state差分は観測値 | 1回のMute UI操作、明示Mute / Solo / effective state、callbackまたはno-op、selection、他Trackへの影響 |
 | S7-solo | P03 Soloをtrueからfalseへ変更 | solo callback、意図しないselection、明示control値 |
 | S8-project-only-hide | visibility同期offでP08をProject-only hide | Project / separate MixConsole状態の分離 |
 | S8-restore | visibility同期onとP08 hiddenを復元 | project切替前のvisibility原状回復 |

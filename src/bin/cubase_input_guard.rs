@@ -10,9 +10,10 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-const GUARD_PROTOCOL_VERSION: u32 = 2;
+const GUARD_PROTOCOL_VERSION: u32 = 3;
 const GUARD_COVERAGE: &str = "action_windows";
 const GUARD_PRIVACY: &str = "counts_and_held_state_boolean";
+const GUARD_POLICY: &str = "consequential_input_only";
 const MAX_COMMAND_BYTES: usize = 512;
 const MAX_ACTION_ID_BYTES: usize = 128;
 #[cfg(target_os = "macos")]
@@ -69,6 +70,18 @@ impl InputCounters {
     fn any(self) -> bool {
         self != Self::default()
     }
+
+    fn any_consequential(self) -> bool {
+        Self {
+            mouse_moved: 0,
+            ..self
+        }
+        .any()
+    }
+}
+
+fn input_changed_during_sample(aggregate_before: u32, aggregate_after: u32) -> bool {
+    aggregate_before != aggregate_after
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -128,7 +141,7 @@ impl GuardState {
                 if self.interference_latched {
                     return Err(GuardError::new(
                         "INTERFERENCE_LATCHED",
-                        "physical input was detected during an earlier armed action window",
+                        "consequential HID input was detected during an earlier armed action window",
                     ));
                 }
                 if let Some(armed) = &self.armed {
@@ -146,7 +159,8 @@ impl GuardState {
                     "type": "armed",
                     "action_id": action_id,
                     "source": "hid_system_state",
-                    "coverage": GUARD_COVERAGE
+                    "coverage": GUARD_COVERAGE,
+                    "policy": GUARD_POLICY
                 }))
             }
             Command::Check { action_id } => {
@@ -162,7 +176,7 @@ impl GuardState {
                     ));
                 }
                 let deltas = current.delta_since(armed.counters);
-                let interference_detected = deltas.any();
+                let interference_detected = deltas.any_consequential();
                 self.armed = None;
                 self.interference_latched |= interference_detected;
                 Ok(json!({
@@ -171,6 +185,7 @@ impl GuardState {
                     "action_id": action_id,
                     "source": "hid_system_state",
                     "coverage": GUARD_COVERAGE,
+                    "policy": GUARD_POLICY,
                     "interference_detected": interference_detected,
                     "deltas": deltas
                 }))
@@ -194,6 +209,7 @@ impl GuardState {
                     "type": "cancelled",
                     "action_id": action_id,
                     "coverage": GUARD_COVERAGE,
+                    "policy": GUARD_POLICY,
                     "session_aborted": true
                 }))
             }
@@ -202,6 +218,7 @@ impl GuardState {
                 "type": "pong",
                 "source": "hid_system_state",
                 "coverage": GUARD_COVERAGE,
+                "policy": GUARD_POLICY,
                 "armed": self.armed.is_some(),
                 "interference_latched": self.interference_latched,
                 "session_aborted": self.session_aborted
@@ -216,7 +233,7 @@ impl GuardState {
                 if self.interference_latched {
                     return Err(GuardError::new(
                         "INTERFERENCE_LATCHED",
-                        "physical input was detected during an armed action window",
+                        "consequential HID input was detected during an armed action window",
                     ));
                 }
                 if self.session_aborted {
@@ -230,6 +247,7 @@ impl GuardState {
                     "type": "finished",
                     "source": "hid_system_state",
                     "coverage": GUARD_COVERAGE,
+                    "policy": GUARD_POLICY,
                     "interference_detected": false
                 }))
             }
@@ -256,6 +274,7 @@ impl GuardError {
             "version": GUARD_PROTOCOL_VERSION,
             "type": "error",
             "coverage": GUARD_COVERAGE,
+            "policy": GUARD_POLICY,
             "error": {
                 "code": self.code,
                 "message": self.message
@@ -369,7 +388,8 @@ fn run() -> Result<(), GuardError> {
         "type": "ready",
         "source": "hid_system_state",
         "privacy": GUARD_PRIVACY,
-        "coverage": GUARD_COVERAGE
+        "coverage": GUARD_COVERAGE,
+        "policy": GUARD_POLICY
     }))
     .map_err(|error| GuardError::new("OUTPUT_ERROR", error.to_string()))?;
 
@@ -419,10 +439,10 @@ fn sample_input_counters() -> Result<InputCounters, GuardError> {
                 format!("HID input counters were not available within 2000 ms: {error}"),
             )
         })?;
-    if state.aggregate_before != state.aggregate_after {
+    if input_changed_during_sample(state.aggregate_before, state.aggregate_after) {
         return Err(GuardError::new(
             "INPUT_DURING_SAMPLE",
-            "input occurred while the HID counter snapshot was being read",
+            "HID input occurred while the counter snapshot was being read",
         ));
     }
     if state.key_held {
@@ -560,6 +580,7 @@ mod tests {
         let snapshot = counters(10, 20);
         assert_eq!(snapshot.delta_since(snapshot), InputCounters::default());
         assert!(!snapshot.delta_since(snapshot).any());
+        assert!(!snapshot.delta_since(snapshot).any_consequential());
     }
 
     #[test]
@@ -570,6 +591,121 @@ mod tests {
         assert_eq!(delta.mouse_moved, 2);
         assert_eq!(delta.key_down, 2);
         assert!(delta.any());
+        assert!(delta.any_consequential());
+    }
+
+    #[test]
+    fn sampling_bracket_rejects_any_aggregate_input_change() {
+        assert!(!input_changed_during_sample(100, 100));
+        assert!(input_changed_during_sample(100, 101));
+        assert!(input_changed_during_sample(u32::MAX, 0));
+    }
+
+    #[test]
+    fn mouse_movement_is_informational_not_consequential() {
+        let movement_only = counters(1, 0);
+        assert!(movement_only.any());
+        assert!(!movement_only.any_consequential());
+
+        let mut state = GuardState::new();
+        state
+            .handle(
+                Command::Arm {
+                    action_id: "coordinate-click".into(),
+                },
+                counters(40, 50),
+            )
+            .unwrap();
+        let response = state
+            .handle(
+                Command::Check {
+                    action_id: "coordinate-click".into(),
+                },
+                counters(47, 50),
+            )
+            .unwrap();
+        assert_eq!(response["interference_detected"], false);
+        assert_eq!(response["deltas"]["mouse_moved"], 7);
+        assert_eq!(response["policy"], GUARD_POLICY);
+        assert!(!state.interference_latched);
+    }
+
+    #[test]
+    fn every_non_movement_counter_is_consequential() {
+        let inputs = [
+            InputCounters {
+                left_mouse_down: 1,
+                ..InputCounters::default()
+            },
+            InputCounters {
+                left_mouse_up: 1,
+                ..InputCounters::default()
+            },
+            InputCounters {
+                right_mouse_down: 1,
+                ..InputCounters::default()
+            },
+            InputCounters {
+                right_mouse_up: 1,
+                ..InputCounters::default()
+            },
+            InputCounters {
+                other_mouse_down: 1,
+                ..InputCounters::default()
+            },
+            InputCounters {
+                other_mouse_up: 1,
+                ..InputCounters::default()
+            },
+            InputCounters {
+                left_mouse_dragged: 1,
+                ..InputCounters::default()
+            },
+            InputCounters {
+                right_mouse_dragged: 1,
+                ..InputCounters::default()
+            },
+            InputCounters {
+                other_mouse_dragged: 1,
+                ..InputCounters::default()
+            },
+            InputCounters {
+                key_down: 1,
+                ..InputCounters::default()
+            },
+            InputCounters {
+                key_up: 1,
+                ..InputCounters::default()
+            },
+            InputCounters {
+                flags_changed: 1,
+                ..InputCounters::default()
+            },
+            InputCounters {
+                scroll_wheel: 1,
+                ..InputCounters::default()
+            },
+            InputCounters {
+                tablet_pointer: 1,
+                ..InputCounters::default()
+            },
+            InputCounters {
+                tablet_proximity: 1,
+                ..InputCounters::default()
+            },
+        ];
+
+        for input in inputs {
+            assert!(input.any_consequential(), "missed {input:?}");
+            let with_movement = InputCounters {
+                mouse_moved: 99,
+                ..input
+            };
+            assert!(
+                with_movement.any_consequential(),
+                "missed {with_movement:?}"
+            );
+        }
     }
 
     #[test]
@@ -637,11 +773,13 @@ mod tests {
                 Command::Check {
                     action_id: "S6-mute".into(),
                 },
-                counters(11, 20),
+                counters(10, 21),
             )
             .unwrap();
         assert_eq!(response["interference_detected"], true);
         assert_eq!(response["coverage"], GUARD_COVERAGE);
+        assert_eq!(response["policy"], GUARD_POLICY);
+        assert_eq!(response["deltas"]["key_down"], 1);
         assert!(state.armed.is_none());
         assert!(state.interference_latched);
         assert_eq!(
@@ -650,7 +788,7 @@ mod tests {
                     Command::Arm {
                         action_id: "next".into()
                     },
-                    counters(11, 20)
+                    counters(10, 21)
                 )
                 .unwrap_err()
                 .code,
@@ -715,6 +853,7 @@ mod tests {
         assert_eq!(response["type"], "finished");
         assert_eq!(response["version"], GUARD_PROTOCOL_VERSION);
         assert_eq!(response["coverage"], GUARD_COVERAGE);
+        assert_eq!(response["policy"], GUARD_POLICY);
 
         let mut armed = GuardState::new();
         armed
@@ -790,5 +929,6 @@ mod tests {
         let error = GuardError::new("TEST", "test").as_json();
         assert_eq!(error["version"], GUARD_PROTOCOL_VERSION);
         assert_eq!(error["coverage"], GUARD_COVERAGE);
+        assert_eq!(error["policy"], GUARD_POLICY);
     }
 }

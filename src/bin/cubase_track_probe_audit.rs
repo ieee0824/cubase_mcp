@@ -205,6 +205,17 @@ impl Profile {
         }
     }
 
+    const fn expected_probe_host_version(self) -> &'static str {
+        match self {
+            Self::C13MixerBank => "13.0.30",
+            Self::C15Combined => "15.0.30",
+        }
+    }
+
+    fn accepts_probe_host_version(self, actual: &str) -> bool {
+        actual == self.expected_probe_host_version() || actual == self.expected_host().1
+    }
+
     const fn requires_direct_access(self) -> bool {
         matches!(self, Self::C15Combined)
     }
@@ -5784,7 +5795,10 @@ fn validate_capabilities(profile: Profile, result: &Value) -> AuditResult<bool> 
         ],
     ) || object.get("read_only").and_then(Value::as_bool) != Some(true)
         || object.get("integrity_failed").and_then(Value::as_bool) != Some(false)
-        || object.get("host_version").and_then(Value::as_str) != Some(profile.expected_host().1)
+        || !object
+            .get("host_version")
+            .and_then(Value::as_str)
+            .is_some_and(|version| profile.accepts_probe_host_version(version))
     {
         return Err(AuditError::new("CAPABILITY_RESULT_INVALID"));
     }
@@ -7152,7 +7166,7 @@ mod tests {
             json!({
                 "read_only": true,
                 "integrity_failed": false,
-                "host_version": profile.expected_host().1,
+                "host_version": profile.expected_probe_host_version(),
                 "data_minimization": {
                     "source_redaction": true,
                     "fixture_revision": 2,
@@ -8603,6 +8617,25 @@ mod tests {
                 .unwrap()
                 + 1
         );
+    }
+
+    #[test]
+    fn probe_host_version_accepts_only_the_profile_semantic_or_exact_build() {
+        assert!(Profile::C13MixerBank.accepts_probe_host_version("13.0.30"));
+        assert!(Profile::C13MixerBank.accepts_probe_host_version("13.0.30.226"));
+        assert!(!Profile::C13MixerBank.accepts_probe_host_version("13.0.30.999"));
+        assert!(!Profile::C13MixerBank.accepts_probe_host_version("13.0.31"));
+        assert!(!Profile::C13MixerBank.accepts_probe_host_version("13.0.30-beta"));
+        assert!(!Profile::C13MixerBank.accepts_probe_host_version("13.0.30.226-extra"));
+        assert!(!Profile::C13MixerBank.accepts_probe_host_version("15.0.30"));
+
+        assert!(Profile::C15Combined.accepts_probe_host_version("15.0.30"));
+        assert!(Profile::C15Combined.accepts_probe_host_version("15.0.30.287"));
+        assert!(!Profile::C15Combined.accepts_probe_host_version("15.0.30.999"));
+        assert!(!Profile::C15Combined.accepts_probe_host_version("15.0.31"));
+        assert!(!Profile::C15Combined.accepts_probe_host_version("15.0.30-beta"));
+        assert!(!Profile::C15Combined.accepts_probe_host_version("15.0.30.287-extra"));
+        assert!(!Profile::C15Combined.accepts_probe_host_version("13.0.30"));
     }
 
     #[test]

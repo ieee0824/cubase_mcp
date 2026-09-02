@@ -79,6 +79,8 @@ repositoryの`.gitignore`は`CMCP_TrackFixture_*`のproject / backup、`CMCP_Tra
 | Instrument / Effectの代替plug-in | 名前または`none` | 該当時 |
 | O1 status / 理由 | `skipped / not_separately_authorized` | yes |
 
+Probe capabilityの`host_version`はMIDI Remoteの`mDefaults.mAppVersion.getVersionString()`から取得する補助照合値であり、実機ではbuild番号を含まない`13.0.30` / `15.0.30`を返し得ます。auditorはprofileごとに、その3要素のsemantic versionまたは対応するbuild込み完全値だけを受理し、別patch、別build、別major versionは拒否します。この補助値をAbout画面またはapp bundleから記録する上表の完全なedition / version / buildの代用にしてはいけません。manifestの完全値とprofileの一致は引き続き独立して必須です。
+
 最低限Cubase 13.0.30で実施し、利用できる場合は13.0.50以降の正確なbuildでも同じ手順を実施します。13.0.50はMIDI Remote API 1.2導入境界ですが、現在の調査環境にはinstallされていません。Cubase 15等のrunは補足情報であり、Issue #4が決定するまでは13.0.50以降のrunを代替した扱いにしません。未installまたは未確認のversionを「検証済み」と記載せず、`not available`として残してください。
 
 Cubase versionごとにfixtureを新規作成します。新しいCubaseで保存した`.cpr`をCubase 13で開いて使い回してはいけません。

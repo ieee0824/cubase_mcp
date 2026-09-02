@@ -412,7 +412,7 @@ function createHarness(options = {}) {
             return driver
         },
         mDefaults: options.directAccessVersion
-            ? { mAppVersion: { getVersionString() { return '15.0.30.287' } } }
+            ? { mAppVersion: { getVersionString() { return '15.0.30' } } }
             : {}
     }
     const context = vm.createContext({

@@ -43,6 +43,8 @@
 
 Cubase edition、runtimeが実際にloadしたAPI、run日時、About画面の完全な表示、repository commit、probe source / installer embedded / deployedとcollector binaryのSHA-256は各runで`PENDING`から置換します。13.0.50は未installなので、Cubase 15のrunを「13.0.50確認済み」として扱いません。
 
+Probeの`host_version`は`mDefaults.mAppVersion.getVersionString()`由来で、build番号を省略した`13.0.30` / `15.0.30`を返し得ます。これはruntime profileの補助照合にだけ使い、auditorは対応する3要素semantic versionまたはprofile固定のbuild込み完全値のどちらかだけを受理します。正確なCubase buildはmanifestのAbout / app bundle証拠で別に固定し、Probe値で補完・推測しません。別patchまたは別build文字列をprefix一致で受理しません。
+
 ### Cubase 13.0.30 / API v1.1の静的surface
 
 | API surface | 静的結果 | runtime状態 | 含意ではないもの |

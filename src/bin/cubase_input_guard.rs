@@ -10,7 +10,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-const GUARD_PROTOCOL_VERSION: u32 = 1;
+const GUARD_PROTOCOL_VERSION: u32 = 2;
+const GUARD_COVERAGE: &str = "action_windows";
+const GUARD_PRIVACY: &str = "counts_and_held_state_boolean";
 const MAX_COMMAND_BYTES: usize = 512;
 const MAX_ACTION_ID_BYTES: usize = 128;
 #[cfg(target_os = "macos")]
@@ -78,6 +80,12 @@ enum Command {
     Finish,
 }
 
+impl Command {
+    fn requires_counter_sample(&self) -> bool {
+        matches!(self, Self::Arm { .. } | Self::Check { .. })
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawCommand {
@@ -96,24 +104,18 @@ struct GuardState {
     armed: Option<ArmedAction>,
     interference_latched: bool,
     session_aborted: bool,
-    last_counters: InputCounters,
 }
 
 impl GuardState {
-    fn new(initial_counters: InputCounters) -> Self {
+    fn new() -> Self {
         Self {
             armed: None,
             interference_latched: false,
             session_aborted: false,
-            last_counters: initial_counters,
         }
     }
 
     fn handle(&mut self, command: Command, current: InputCounters) -> Result<Value, GuardError> {
-        let session_deltas = current.delta_since(self.last_counters);
-        self.last_counters = current;
-        self.interference_latched |= session_deltas.any();
-
         match command {
             Command::Arm { action_id } => {
                 validate_action_id(&action_id)?;
@@ -126,7 +128,7 @@ impl GuardState {
                 if self.interference_latched {
                     return Err(GuardError::new(
                         "INTERFERENCE_LATCHED",
-                        "physical input was detected earlier in this guard session",
+                        "physical input was detected during an earlier armed action window",
                     ));
                 }
                 if let Some(armed) = &self.armed {
@@ -143,7 +145,8 @@ impl GuardState {
                     "version": GUARD_PROTOCOL_VERSION,
                     "type": "armed",
                     "action_id": action_id,
-                    "source": "hid_system_state"
+                    "source": "hid_system_state",
+                    "coverage": GUARD_COVERAGE
                 }))
             }
             Command::Check { action_id } => {
@@ -167,6 +170,7 @@ impl GuardState {
                     "type": "result",
                     "action_id": action_id,
                     "source": "hid_system_state",
+                    "coverage": GUARD_COVERAGE,
                     "interference_detected": interference_detected,
                     "deltas": deltas
                 }))
@@ -189,6 +193,7 @@ impl GuardState {
                     "version": GUARD_PROTOCOL_VERSION,
                     "type": "cancelled",
                     "action_id": action_id,
+                    "coverage": GUARD_COVERAGE,
                     "session_aborted": true
                 }))
             }
@@ -196,6 +201,7 @@ impl GuardState {
                 "version": GUARD_PROTOCOL_VERSION,
                 "type": "pong",
                 "source": "hid_system_state",
+                "coverage": GUARD_COVERAGE,
                 "armed": self.armed.is_some(),
                 "interference_latched": self.interference_latched,
                 "session_aborted": self.session_aborted
@@ -210,7 +216,7 @@ impl GuardState {
                 if self.interference_latched {
                     return Err(GuardError::new(
                         "INTERFERENCE_LATCHED",
-                        "physical input was detected during this guard session",
+                        "physical input was detected during an armed action window",
                     ));
                 }
                 if self.session_aborted {
@@ -223,6 +229,7 @@ impl GuardState {
                     "version": GUARD_PROTOCOL_VERSION,
                     "type": "finished",
                     "source": "hid_system_state",
+                    "coverage": GUARD_COVERAGE,
                     "interference_detected": false
                 }))
             }
@@ -248,6 +255,7 @@ impl GuardError {
         json!({
             "version": GUARD_PROTOCOL_VERSION,
             "type": "error",
+            "coverage": GUARD_COVERAGE,
             "error": {
                 "code": self.code,
                 "message": self.message
@@ -355,19 +363,19 @@ fn run() -> Result<(), GuardError> {
         ));
     }
 
-    let initial_counters = sample_input_counters()?;
+    sample_input_counters()?;
     emit(&json!({
         "version": GUARD_PROTOCOL_VERSION,
         "type": "ready",
         "source": "hid_system_state",
-        "privacy": "counts_only",
-        "coverage": "session_wide"
+        "privacy": GUARD_PRIVACY,
+        "coverage": GUARD_COVERAGE
     }))
     .map_err(|error| GuardError::new("OUTPUT_ERROR", error.to_string()))?;
 
     let stdin = io::stdin();
     let mut reader = stdin.lock();
-    let mut state = GuardState::new(initial_counters);
+    let mut state = GuardState::new();
     while let Some(line) = read_bounded_line(&mut reader, MAX_COMMAND_BYTES)
         .map_err(|error| GuardError::new("INPUT_ERROR", error.to_string()))?
     {
@@ -376,7 +384,12 @@ fn run() -> Result<(), GuardError> {
         }
         let command = parse_command(&line)?;
         let finishing = command == Command::Finish;
-        let response = state.handle(command, sample_input_counters()?)?;
+        let counters = if command.requires_counter_sample() {
+            sample_input_counters()?
+        } else {
+            InputCounters::default()
+        };
+        let response = state.handle(command, counters)?;
         emit(&response).map_err(|error| GuardError::new("OUTPUT_ERROR", error.to_string()))?;
         if finishing {
             return Ok(());
@@ -598,7 +611,7 @@ mod tests {
 
     #[test]
     fn guard_requires_exact_pair_and_disarms_after_check() {
-        let mut state = GuardState::new(counters(10, 20));
+        let mut state = GuardState::new();
         state
             .handle(
                 Command::Arm {
@@ -628,6 +641,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(response["interference_detected"], true);
+        assert_eq!(response["coverage"], GUARD_COVERAGE);
         assert!(state.armed.is_none());
         assert!(state.interference_latched);
         assert_eq!(
@@ -642,12 +656,19 @@ mod tests {
                 .code,
             "INTERFERENCE_LATCHED"
         );
+        assert_eq!(
+            state
+                .handle(Command::Finish, InputCounters::default())
+                .unwrap_err()
+                .code,
+            "INTERFERENCE_LATCHED"
+        );
     }
 
     #[test]
-    fn input_between_actions_is_latched_before_the_next_arm() {
+    fn input_between_actions_is_rebaselined_by_the_next_arm() {
         let baseline = counters(10, 20);
-        let mut state = GuardState::new(baseline);
+        let mut state = GuardState::new();
         state
             .handle(
                 Command::Arm {
@@ -666,28 +687,36 @@ mod tests {
             .unwrap();
         assert_eq!(checked["interference_detected"], false);
 
-        assert_eq!(
-            state
-                .handle(
-                    Command::Arm {
-                        action_id: "second".into(),
-                    },
-                    counters(11, 20),
-                )
-                .unwrap_err()
-                .code,
-            "INTERFERENCE_LATCHED"
-        );
+        let next_baseline = counters(11, 20);
+        state
+            .handle(
+                Command::Arm {
+                    action_id: "second".into(),
+                },
+                next_baseline,
+            )
+            .unwrap();
+        let checked = state
+            .handle(
+                Command::Check {
+                    action_id: "second".into(),
+                },
+                next_baseline,
+            )
+            .unwrap();
+        assert_eq!(checked["interference_detected"], false);
     }
 
     #[test]
     fn finish_requires_a_clean_unarmed_session() {
         let baseline = counters(10, 20);
-        let mut state = GuardState::new(baseline);
+        let mut state = GuardState::new();
         let response = state.handle(Command::Finish, baseline).unwrap();
         assert_eq!(response["type"], "finished");
+        assert_eq!(response["version"], GUARD_PROTOCOL_VERSION);
+        assert_eq!(response["coverage"], GUARD_COVERAGE);
 
-        let mut armed = GuardState::new(baseline);
+        let mut armed = GuardState::new();
         armed
             .handle(
                 Command::Arm {
@@ -701,7 +730,7 @@ mod tests {
             "FINISH_WHILE_ARMED"
         );
 
-        let mut cancelled = GuardState::new(baseline);
+        let mut cancelled = GuardState::new();
         cancelled
             .handle(
                 Command::Arm {
@@ -726,5 +755,40 @@ mod tests {
                 .code,
             "SESSION_ABORTED"
         );
+    }
+
+    #[test]
+    fn idle_input_is_not_sampled_by_ping_or_finish() {
+        let mut state = GuardState::new();
+        let idle_input = counters(99, 42);
+        let pong = state.handle(Command::Ping, idle_input).unwrap();
+        assert_eq!(pong["type"], "pong");
+        assert_eq!(pong["interference_latched"], false);
+        let finished = state.handle(Command::Finish, idle_input).unwrap();
+        assert_eq!(finished["type"], "finished");
+
+        assert!(
+            Command::Arm {
+                action_id: "arm".into()
+            }
+            .requires_counter_sample()
+        );
+        assert!(
+            Command::Check {
+                action_id: "check".into()
+            }
+            .requires_counter_sample()
+        );
+        assert!(!Command::Ping.requires_counter_sample());
+        assert!(!Command::Finish.requires_counter_sample());
+        assert!(
+            !Command::Cancel {
+                action_id: "cancel".into()
+            }
+            .requires_counter_sample()
+        );
+        let error = GuardError::new("TEST", "test").as_json();
+        assert_eq!(error["version"], GUARD_PROTOCOL_VERSION);
+        assert_eq!(error["coverage"], GUARD_COVERAGE);
     }
 }

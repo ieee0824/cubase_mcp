@@ -59,6 +59,7 @@ jobs:
         run: |
           bash -n scripts/check-input-guard-calibration.sh
           bash -n scripts/check-track-probe-evidence.sh
+          node tests/track_probe_evidence_checker.test.js
 
       - name: Run Clippy
         if: runner.os == 'Linux'

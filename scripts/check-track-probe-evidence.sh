@@ -1,12 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-EXPECTED_ACTION_COUNT=56
+EXPECTED_ACTION_COUNT=63
+EXPECTED_TRACE_RECORD_COUNT=$((EXPECTED_ACTION_COUNT + 2))
+EXPECTED_CAPTURE_COUNT=$((EXPECTED_ACTION_COUNT * 2))
+EXPECTED_CLICK_ACTION_COUNT=46
+EXPECTED_ACTIVATION_ACTION_COUNT=7
+# The detached index has 94 non-formal-capture entries. Each formal action
+# contributes two screenshots and two state dumps.
+EXPECTED_NON_CAPTURE_INDEX_ENTRY_COUNT=94
+EXPECTED_DETACHED_INDEX_COUNT=$((EXPECTED_NON_CAPTURE_INDEX_ENTRY_COUNT + EXPECTED_ACTION_COUNT * 4))
 CALIBRATION_PREFIX='cmcp-calibration'
-EXPECTED_ACTION_IDS='["INIT.launch-bootstrap","E0.open-project","E1.open-project","E8.open-project","C1.open-project","S0.save-as-shortcut","S0.save-as-name","S0.save-as-confirm","S1-select.track","S1-rename.activate","S1-rename.set-value","S1-rename.commit","S2-select-anchor.track-list-page-down","S2-select-anchor.track","S2-add.project-menu","S2-add.audio-item","S2-add.name","S2-add.confirm","S3-select-delete.track","S3-delete.project-menu","S3-delete.selected-item","S4-show.mixconsole-open","S4-show.visibility-toggle","S5-select-anchor.window-menu","S5-select-anchor.project-window","S5-select-anchor.track","S5-select-change.track","S6-mute.window-menu","S6-mute.mixconsole-window","S6-mute.control","S7-solo.control","S8-project-only-hide.sync-menu","S8-project-only-hide.sync-off","S8-project-only-hide.window-menu-project","S8-project-only-hide.project-window","S8-project-only-hide.left-zone-open","S8-project-only-hide.visibility-toggle","S8-project-only-hide.window-menu-mixconsole","S8-project-only-hide.mixconsole-window","S8-restore.window-menu-project","S8-restore.project-window","S8-restore.sync-menu","S8-restore.sync-on","S8-restore.save-shortcut","S8-restore.window-menu-mixconsole","S8-restore.mixconsole-window","S9-empty.open-project","S9-mutation.open-project","S9-baseline.open-project","R1.studio-menu","R1.midi-remote-manager","R1.scripts-tab","R1.reload-scripts","R2.cubase-menu","R2.quit-item","R2.launch-baseline"]'
-EXPECTED_ACTION_CHECKPOINTS='["INIT","E0","E1","E8","C1","S0","S0","S0","S1-select","S1-rename","S1-rename","S1-rename","S2-select-anchor","S2-select-anchor","S2-add","S2-add","S2-add","S2-add","S3-select-delete","S3-delete","S3-delete","S4-show","S4-show","S5-select-anchor","S5-select-anchor","S5-select-anchor","S5-select-change","S6-mute","S6-mute","S6-mute","S7-solo","S8-project-only-hide","S8-project-only-hide","S8-project-only-hide","S8-project-only-hide","S8-project-only-hide","S8-project-only-hide","S8-project-only-hide","S8-project-only-hide","S8-restore","S8-restore","S8-restore","S8-restore","S8-restore","S8-restore","S8-restore","S9-empty","S9-mutation","S9-baseline","R1","R1","R1","R1","R2","R2","R2"]'
-EXPECTED_ACTION_APIS='["exec_command.open","exec_command.open","exec_command.open","exec_command.open","exec_command.open","computer_use.press_key","computer_use.set_value","computer_use.click.element","computer_use.click.coordinate","computer_use.click.coordinate","computer_use.set_value","computer_use.press_key","computer_use.click.coordinate","computer_use.click.coordinate","computer_use.click.element","computer_use.click.element","computer_use.set_value","computer_use.press_key","computer_use.click.coordinate","computer_use.click.element","computer_use.click.element","computer_use.press_key","computer_use.click.coordinate","computer_use.click.element","computer_use.click.element","computer_use.click.coordinate","computer_use.click.coordinate","computer_use.click.element","computer_use.click.element","computer_use.click.coordinate","computer_use.click.coordinate","computer_use.click.coordinate","computer_use.click.element","computer_use.click.element","computer_use.click.element","computer_use.click.coordinate","computer_use.click.coordinate","computer_use.click.element","computer_use.click.element","computer_use.click.element","computer_use.click.element","computer_use.click.coordinate","computer_use.click.element","computer_use.press_key","computer_use.click.element","computer_use.click.element","exec_command.open","exec_command.open","exec_command.open","computer_use.click.element","computer_use.click.element","computer_use.click.coordinate","computer_use.click.coordinate","computer_use.click.element","computer_use.click.element","exec_command.open"]'
-EXPECTED_ACTION_CLICK_COUNTS='[null,null,null,null,null,null,null,1,1,2,null,null,1,1,1,1,null,null,1,1,1,null,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,null,1,1,null,null,null,1,1,1,1,1,1,null]'
+EXPECTED_ACTIVATION_DIALOG_TEXT='プロジェクトをアクティブにしますか？'
+EXPECTED_ACTIVATION_AFFIRMATIVE_IDENTITY='ボタン 有効化, ID: action-button-1'
+EXPECTED_ACTIVATION_NEGATIVE_IDENTITY='ボタン いいえ, ID: action-button-2'
+EXPECTED_ACTIVATION_OPEN_ACTION_IDS='["E0.open-project","E1.open-project","E8.open-project","C1.open-project","S9-empty.open-project","S9-mutation.open-project","S9-baseline.open-project"]'
+EXPECTED_ACTIVATION_ACTION_IDS='["E0.activate-project","E1.activate-project","E8.activate-project","C1.activate-project","S9-empty.activate-project","S9-mutation.activate-project","S9-baseline.activate-project"]'
+EXPECTED_ACTION_IDS='["INIT.launch-bootstrap","E0.open-project","E0.activate-project","E1.open-project","E1.activate-project","E8.open-project","E8.activate-project","C1.open-project","C1.activate-project","S0.save-as-shortcut","S0.save-as-name","S0.save-as-confirm","S1-select.track","S1-rename.activate","S1-rename.set-value","S1-rename.commit","S2-select-anchor.track-list-page-down","S2-select-anchor.track","S2-add.project-menu","S2-add.audio-item","S2-add.name","S2-add.confirm","S3-select-delete.track","S3-delete.project-menu","S3-delete.selected-item","S4-show.mixconsole-open","S4-show.visibility-toggle","S5-select-anchor.window-menu","S5-select-anchor.project-window","S5-select-anchor.track","S5-select-change.track","S6-mute.window-menu","S6-mute.mixconsole-window","S6-mute.control","S7-solo.control","S8-project-only-hide.sync-menu","S8-project-only-hide.sync-off","S8-project-only-hide.window-menu-project","S8-project-only-hide.project-window","S8-project-only-hide.left-zone-open","S8-project-only-hide.visibility-toggle","S8-project-only-hide.window-menu-mixconsole","S8-project-only-hide.mixconsole-window","S8-restore.window-menu-project","S8-restore.project-window","S8-restore.sync-menu","S8-restore.sync-on","S8-restore.save-shortcut","S8-restore.window-menu-mixconsole","S8-restore.mixconsole-window","S9-empty.open-project","S9-empty.activate-project","S9-mutation.open-project","S9-mutation.activate-project","S9-baseline.open-project","S9-baseline.activate-project","R1.studio-menu","R1.midi-remote-manager","R1.scripts-tab","R1.reload-scripts","R2.cubase-menu","R2.quit-item","R2.launch-baseline"]'
+EXPECTED_ACTION_CHECKPOINTS='["INIT","E0","E0","E1","E1","E8","E8","C1","C1","S0","S0","S0","S1-select","S1-rename","S1-rename","S1-rename","S2-select-anchor","S2-select-anchor","S2-add","S2-add","S2-add","S2-add","S3-select-delete","S3-delete","S3-delete","S4-show","S4-show","S5-select-anchor","S5-select-anchor","S5-select-anchor","S5-select-change","S6-mute","S6-mute","S6-mute","S7-solo","S8-project-only-hide","S8-project-only-hide","S8-project-only-hide","S8-project-only-hide","S8-project-only-hide","S8-project-only-hide","S8-project-only-hide","S8-project-only-hide","S8-restore","S8-restore","S8-restore","S8-restore","S8-restore","S8-restore","S8-restore","S9-empty","S9-empty","S9-mutation","S9-mutation","S9-baseline","S9-baseline","R1","R1","R1","R1","R2","R2","R2"]'
+EXPECTED_ACTION_APIS='["exec_command.open","exec_command.open","computer_use.click.element","exec_command.open","computer_use.click.element","exec_command.open","computer_use.click.element","exec_command.open","computer_use.click.element","computer_use.press_key","computer_use.set_value","computer_use.click.element","computer_use.click.coordinate","computer_use.click.coordinate","computer_use.set_value","computer_use.press_key","computer_use.click.coordinate","computer_use.click.coordinate","computer_use.click.element","computer_use.click.element","computer_use.set_value","computer_use.press_key","computer_use.click.coordinate","computer_use.click.element","computer_use.click.element","computer_use.press_key","computer_use.click.coordinate","computer_use.click.element","computer_use.click.element","computer_use.click.coordinate","computer_use.click.coordinate","computer_use.click.element","computer_use.click.element","computer_use.click.coordinate","computer_use.click.coordinate","computer_use.click.coordinate","computer_use.click.element","computer_use.click.element","computer_use.click.element","computer_use.click.coordinate","computer_use.click.coordinate","computer_use.click.element","computer_use.click.element","computer_use.click.element","computer_use.click.element","computer_use.click.coordinate","computer_use.click.element","computer_use.press_key","computer_use.click.element","computer_use.click.element","exec_command.open","computer_use.click.element","exec_command.open","computer_use.click.element","exec_command.open","computer_use.click.element","computer_use.click.element","computer_use.click.element","computer_use.click.coordinate","computer_use.click.coordinate","computer_use.click.element","computer_use.click.element","exec_command.open"]'
+EXPECTED_ACTION_CLICK_COUNTS='[null,null,1,null,1,null,1,null,1,null,null,1,1,2,null,null,1,1,1,1,null,null,1,1,1,null,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,null,1,1,null,1,null,1,null,1,1,1,1,1,1,1,null]'
 
 die() {
   echo "check-track-probe-evidence: $*" >&2
@@ -243,7 +256,8 @@ jq -e \
   --arg run "$RUN_ID" --arg profile "$PROFILE" --arg commit "$EXPECTED_COMMIT" --arg guard_sha "$EXPECTED_GUARD_SHA" \
   --argjson action_count "$EXPECTED_ACTION_COUNT" --argjson action_ids "$EXPECTED_ACTION_IDS" \
   --argjson action_checkpoints "$EXPECTED_ACTION_CHECKPOINTS" --argjson action_apis "$EXPECTED_ACTION_APIS" \
-  --argjson action_click_counts "$EXPECTED_ACTION_CLICK_COUNTS" '
+  --argjson action_click_counts "$EXPECTED_ACTION_CLICK_COUNTS" \
+  --argjson click_action_count "$EXPECTED_CLICK_ACTION_COUNT" '
     .ui_action_inventory_version == 1 and .inventory_state == "frozen" and
     .run_id == $run and .profile == $profile and .fixture_revision == 2 and .repository_commit == $commit and
     .guard.protocol_version == 4 and .guard.source == "hid_system_state" and
@@ -265,7 +279,7 @@ jq -e \
       (.precondition | type == "string" and length > 0) and
       (.postcondition | type == "string" and length > 0)
     ) and
-    ([.actions[] | select(.api == "computer_use.click.element" or .api == "computer_use.click.coordinate")] | length) == 39 and
+    ([.actions[] | select(.api == "computer_use.click.element" or .api == "computer_use.click.coordinate")] | length) == $click_action_count and
     all(.actions[] | select(.api == "computer_use.click.element" or .api == "computer_use.click.coordinate");
       (.click_count | type == "number" and (. == 1 or . == 2))
     ) and
@@ -329,11 +343,11 @@ jq -s -e --argjson action_count "$EXPECTED_ACTION_COUNT" '
   )
 ' "$GUARD" >/dev/null || die "formal guard v4 contract, identity, sequence, or deltas invalid"
 
-jq -s -e --slurpfile inventory "$INVENTORY" '
+jq -s -e --argjson action_count "$EXPECTED_ACTION_COUNT" --slurpfile inventory "$INVENTORY" '
   . as $records |
   ([.[] | select(.type == "armed") | .action_id] == ($inventory[0].actions | map(.action_id))) and
   ([.[] | select(.type == "result") | .action_id] == ($inventory[0].actions | map(.action_id))) and
-  all(range(0; 56); . as $i |
+  all(range(0; $action_count); . as $i |
     ($i * 2 + 1) as $armed | ($i * 2 + 2) as $result |
     $records[$armed].type == "armed" and $records[$result].type == "result" and
     $records[$armed].action_id == $inventory[0].actions[$i].action_id and
@@ -342,7 +356,10 @@ jq -s -e --slurpfile inventory "$INVENTORY" '
 ' "$GUARD" >/dev/null || die "formal guard pairs are not adjacent and inventory ordered"
 
 jq -s -e --slurpfile guard "$GUARD" --slurpfile inventory "$INVENTORY" --slurpfile run_record "$RUN_RECORD" \
-  --arg run "$RUN_ID" --arg profile "$PROFILE" '
+  --arg run "$RUN_ID" --arg profile "$PROFILE" --argjson action_count "$EXPECTED_ACTION_COUNT" \
+  --argjson trace_record_count "$EXPECTED_TRACE_RECORD_COUNT" \
+  --argjson activation_action_ids "$EXPECTED_ACTIVATION_ACTION_IDS" \
+  --arg activation_identity "$EXPECTED_ACTIVATION_AFFIRMATIVE_IDENTITY" '
   def hex64: type == "string" and test("^[0-9a-f]{64}$");
   def nonempty: type == "string" and length > 0;
   def leap($year): ($year % 4 == 0) and (($year % 100 != 0) or ($year % 400 == 0));
@@ -366,7 +383,7 @@ jq -s -e --slurpfile guard "$GUARD" --slurpfile inventory "$INVENTORY" --slurpfi
      ($parts.zone == "Z" or (($parts.zone_hour | tonumber) <= 23 and ($parts.zone_minute | tonumber) <= 59)));
   def zone: capture("(?<zone>Z|[+-][0-9]{2}:[0-9]{2})$").zone;
   . as $records |
-  [.[1:57][]] as $actions |
+  [.[1:($action_count + 1)][]] as $actions |
   ([.[0].started_at] + [$actions[] | .pre_state.captured_at, .call_started_at, .call_ended_at, .post_state.captured_at] + [.[-1].ended_at]) as $times |
   ($times[0] | zone) as $zone |
   $run_record[0].fixture as $fixture |
@@ -382,7 +399,7 @@ jq -s -e --slurpfile guard "$GUARD" --slurpfile inventory "$INVENTORY" --slurpfi
     "R2.launch-baseline": $fixture.core_baseline.absolute_path
   } as $expected_open_paths |
   (if $profile == "c15_combined" then "Cubase 15" else "Cubase 13" end) as $expected_ui_app |
-  length == 58 and
+  length == $trace_record_count and
   .[0].operator_tool_trace_version == 1 and .[0].record_type == "session" and .[0].run_id == $run and
   (.[0].session_id | nonempty) and
   .[0].guard_session_id == $guard[0].guard_session_id and
@@ -391,14 +408,14 @@ jq -s -e --slurpfile guard "$GUARD" --slurpfile inventory "$INVENTORY" --slurpfi
   .[-1].operator_tool_trace_version == 1 and .[-1].record_type == "session_end" and
   .[-1].run_id == $run and .[-1].session_id == .[0].session_id and
   .[-1].finished_observed == true and .[-1].guard_process_exit_status == 0 and .[-1].no_retry_within_process == true and
-  ([.[1:57][].action_id] == ($inventory[0].actions | map(.action_id))) and
-  ([.[1:57][].ordinal] == [range(1; 57)]) and
-  ([.[1:57][].checkpoint_id] == ($inventory[0].actions | map(.checkpoint_id))) and
-  ([.[1:57][].api] == ($inventory[0].actions | map(.api))) and
-  ([.[1:57][].operation] == ($inventory[0].actions | map(.operation))) and
-  ([.[1:57][].expected_precondition] == ($inventory[0].actions | map(.precondition))) and
-  ([.[1:57][].expected_postcondition] == ($inventory[0].actions | map(.postcondition))) and
-  all(.[1:57][];
+  ([.[1:($action_count + 1)][].action_id] == ($inventory[0].actions | map(.action_id))) and
+  ([.[1:($action_count + 1)][].ordinal] == [range(1; $action_count + 1)]) and
+  ([.[1:($action_count + 1)][].checkpoint_id] == ($inventory[0].actions | map(.checkpoint_id))) and
+  ([.[1:($action_count + 1)][].api] == ($inventory[0].actions | map(.api))) and
+  ([.[1:($action_count + 1)][].operation] == ($inventory[0].actions | map(.operation))) and
+  ([.[1:($action_count + 1)][].expected_precondition] == ($inventory[0].actions | map(.precondition))) and
+  ([.[1:($action_count + 1)][].expected_postcondition] == ($inventory[0].actions | map(.postcondition))) and
+  all(.[1:($action_count + 1)][];
     .operator_tool_trace_version == 1 and .record_type == "action" and .run_id == $run and
     .session_id == $records[0].session_id and
     .guard_armed_confirmed == true and .guard_result_confirmed == true and
@@ -421,33 +438,37 @@ jq -s -e --slurpfile guard "$GUARD" --slurpfile inventory "$INVENTORY" --slurpfi
     $actions[$i - 1].post_state.captured_at < $actions[$i].pre_state.captured_at
   ) and
   $actions[-1].post_state.captured_at < $records[-1].ended_at and
-  all(range(0; 56); . as $i |
+  all(range(0; $action_count); . as $i |
     $records[$i + 1].action_id == $inventory[0].actions[$i].action_id and
     (if ($records[$i + 1].api == "computer_use.click.element" or $records[$i + 1].api == "computer_use.click.coordinate") then
       $records[$i + 1].target_binding.click_count == $inventory[0].actions[$i].click_count
      else true end)
   ) and
-  all(.[1:57][] | select(.api == "computer_use.click.element");
+  all(.[1:($action_count + 1)][] | select(.api == "computer_use.click.element");
     .target_binding.kind == "semantic_element" and
     (.target_binding.application | nonempty) and (.target_binding.window | nonempty) and (.target_binding.element_identity | nonempty)
   ) and
-  all(.[1:57][] | select(.api == "computer_use.click.coordinate");
+  all(.[1:($action_count + 1)][] |
+      select(.action_id as $action_id | ($activation_action_ids | index($action_id)) != null);
+    .target_binding.element_identity == $activation_identity
+  ) and
+  all(.[1:($action_count + 1)][] | select(.api == "computer_use.click.coordinate");
     .target_binding.kind == "window_coordinate" and
     (.target_binding.application | nonempty) and (.target_binding.window | nonempty) and
     (.target_binding.x | type == "number") and (.target_binding.y | type == "number") and
     (.target_binding.fresh_screenshot_sha256 | hex64) and
     .target_binding.fresh_screenshot_sha256 == .pre_state.screenshot_sha256
   ) and
-  all(.[1:57][] | select(.api == "computer_use.set_value");
+  all(.[1:($action_count + 1)][] | select(.api == "computer_use.set_value");
     .target_binding.kind == "semantic_element" and
     (.target_binding.application | nonempty) and (.target_binding.window | nonempty) and (.target_binding.element_identity | nonempty)
   ) and
-  all(.[1:57][] | select(.api == "computer_use.press_key");
+  all(.[1:($action_count + 1)][] | select(.api == "computer_use.press_key");
     .target_binding.kind == "key_chord" and
     (.target_binding.application | nonempty) and (.target_binding.window | nonempty) and
     (.target_binding.keys | type == "array" and length > 0 and all(.[]; nonempty))
   ) and
-  all(.[1:57][] | select(.api == "exec_command.open");
+  all(.[1:($action_count + 1)][] | select(.api == "exec_command.open");
     .target_binding.kind == "os_open" and
     (.target_binding.exact_application_or_bundle_path | startswith("/")) and
     (.target_binding.absolute_document_path | startswith("/")) and
@@ -458,11 +479,11 @@ jq -s -e --slurpfile guard "$GUARD" --slurpfile inventory "$INVENTORY" --slurpfi
      else .pre_state.app == $expected_ui_app end) and
     .post_state.app == $expected_ui_app
   ) and
-  all(.[1:57][] | select(.api != "exec_command.open" and .action_id != "R2.quit-item");
+  all(.[1:($action_count + 1)][] | select(.api != "exec_command.open" and .action_id != "R2.quit-item");
     .target_binding.application == $expected_ui_app and
     .pre_state.app == $expected_ui_app and .post_state.app == $expected_ui_app
   ) and
-  (.[1:57][] | select(.action_id == "R2.quit-item") |
+  (.[1:($action_count + 1)][] | select(.action_id == "R2.quit-item") |
     .target_binding.application == $expected_ui_app and
     .pre_state.app == $expected_ui_app and .post_state.app == "Finder") and
   all(.[]; (has("retry_attempted") | not) and (has("completed_without_retry") | not))
@@ -473,12 +494,12 @@ SCREENSHOT_REFS=$(jq -sc '
     {path: .pre_state.screenshot_path, sha256: .pre_state.screenshot_sha256},
     {path: .post_state.screenshot_path, sha256: .post_state.screenshot_sha256}]
 ' "$TRACE")
-jq -e '
-  length == 112 and
+jq -e --argjson capture_count "$EXPECTED_CAPTURE_COUNT" '
+  length == $capture_count and
   all(.[];
     (.path | type == "string" and test("^screenshots/[A-Za-z0-9][A-Za-z0-9._-]*\\.(png|jpg|jpeg)$")) and
     (.sha256 | type == "string" and test("^[0-9a-f]{64}$"))
-  ) and ((map(.path) | unique | length) == 112)
+  ) and ((map(.path) | unique | length) == $capture_count)
 ' <<<"$SCREENSHOT_REFS" >/dev/null || die "each formal action must bind two unique canonical screenshot files"
 
 screenshot_count=0
@@ -491,21 +512,22 @@ while IFS= read -r -d '' screenshot; do
   expected_sha=$(jq -er --arg path "$relative_path" '.[] | select(.path == $path) | .sha256' <<<"$SCREENSHOT_REFS") || die "extra screenshot not referenced by trace: $relative_path"
   test "$(sha256_file "$screenshot")" = "$expected_sha" || die "screenshot digest mismatch: $relative_path"
 done < <(find "$SCREENSHOT_DIRECTORY" -mindepth 1 -maxdepth 1 -print0)
-test "$screenshot_count" -eq 112 || die "formal screenshots directory must contain exactly 112 trace-bound files (found $screenshot_count)"
+test "$screenshot_count" -eq "$EXPECTED_CAPTURE_COUNT" ||
+  die "formal screenshots directory must contain exactly $EXPECTED_CAPTURE_COUNT trace-bound files (found $screenshot_count)"
 
 STATE_REFS=$(jq -sc '
   [.[] | select(.record_type == "action") |
     {path: .pre_state.state_path, sha256: .pre_state.state_sha256, captured_at: .pre_state.captured_at, app: .pre_state.app},
     {path: .post_state.state_path, sha256: .post_state.state_sha256, captured_at: .post_state.captured_at, app: .post_state.app}]
 ' "$TRACE")
-jq -e '
-  length == 112 and
+jq -e --argjson capture_count "$EXPECTED_CAPTURE_COUNT" '
+  length == $capture_count and
   all(.[];
     (.path | type == "string" and test("^states/[A-Za-z0-9][A-Za-z0-9._-]*\\.json$")) and
     (.sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
     (.captured_at | type == "string" and length > 0) and
     (.app | type == "string" and length > 0)
-  ) and ((map(.path) | unique | length) == 112)
+  ) and ((map(.path) | unique | length) == $capture_count)
 ' <<<"$STATE_REFS" >/dev/null || die "each formal action must bind two unique canonical JSON state dumps"
 
 state_count=0
@@ -530,7 +552,97 @@ while IFS= read -r -d '' state_dump; do
   test "$(jq -sr '.[0].captured_at | select(type == "string")' "$state_dump")" = "$expected_captured_at" || die "state dump captured_at does not match trace: $relative_path"
   test "$(jq -sr '.[0].app | select(type == "string")' "$state_dump")" = "$expected_app" || die "state dump application does not match trace: $relative_path"
 done < <(find "$STATE_DIRECTORY" -mindepth 1 -maxdepth 1 -print0)
-test "$state_count" -eq 112 || die "formal states directory must contain exactly 112 trace-bound files (found $state_count)"
+test "$state_count" -eq "$EXPECTED_CAPTURE_COUNT" ||
+  die "formal states directory must contain exactly $EXPECTED_CAPTURE_COUNT trace-bound files (found $state_count)"
+
+validate_activation_dialog_state() {
+  local path=$1
+  jq -s -e \
+    --arg dialog "$EXPECTED_ACTIVATION_DIALOG_TEXT" \
+    --arg affirmative "$EXPECTED_ACTIVATION_AFFIRMATIVE_IDENTITY" \
+    --arg negative "$EXPECTED_ACTIVATION_NEGATIVE_IDENTITY" '
+      length == 1 and (.[0].text as $text |
+        ($text | split($dialog) | length) == 2 and
+        ([$text | split("\n")[] | select(test("^[[:space:]]*[0-9]+ ダイアログ( |$)"))] | length) == 1 and
+        ([$text | split("\n")[] | select(test("^[[:space:]]*[0-9]+ ボタン ")) |
+          sub("^[[:space:]]*[0-9]+ "; "")] | sort) == ([$negative, $affirmative] | sort)
+      )
+    ' "$path" >/dev/null || die "activation dialog state is not the exact two-button Japanese contract: ${path#"$EVIDENCE_DIRECTORY"/}"
+}
+
+validate_no_activation_dialog_state() {
+  local path=$1
+  jq -s -e \
+    --arg dialog "$EXPECTED_ACTIVATION_DIALOG_TEXT" \
+    --arg affirmative "$EXPECTED_ACTIVATION_AFFIRMATIVE_IDENTITY" \
+    --arg negative "$EXPECTED_ACTIVATION_NEGATIVE_IDENTITY" '
+      length == 1 and (.[0].text |
+        ([split("\n")[] | select(test("^[[:space:]]*[0-9]+ ダイアログ( |$)"))] | length) == 0 and
+        (contains($dialog) | not) and
+        (contains($affirmative) | not) and
+        (contains($negative) | not)
+      )
+    ' "$path" >/dev/null || die "activation dialog persisted outside its exact open-to-activate transition: ${path#"$EVIDENCE_DIRECTORY"/}"
+}
+
+activation_transition_count=0
+while IFS=$'\t' read -r open_action open_pre open_post activation_action activation_pre activation_post activation_identity; do
+  activation_transition_count=$((activation_transition_count + 1))
+  test -n "$open_action" && test -n "$activation_action" || die "activation transition is incomplete in operator trace"
+  test "$activation_identity" = "$EXPECTED_ACTIVATION_AFFIRMATIVE_IDENTITY" ||
+    die "activation action did not target the exact affirmative semantic button: $activation_action"
+  for relative_path in "$open_pre" "$open_post" "$activation_pre" "$activation_post"; do
+    case "$relative_path" in
+      states/[A-Za-z0-9]*.json) ;;
+      *) die "activation transition references an invalid state path: $relative_path" ;;
+    esac
+    require_nonempty "$EVIDENCE_DIRECTORY/$relative_path"
+  done
+  validate_no_activation_dialog_state "$EVIDENCE_DIRECTORY/$open_pre"
+  validate_activation_dialog_state "$EVIDENCE_DIRECTORY/$open_post"
+  validate_activation_dialog_state "$EVIDENCE_DIRECTORY/$activation_pre"
+  validate_no_activation_dialog_state "$EVIDENCE_DIRECTORY/$activation_post"
+done < <(
+  jq -sr \
+    --argjson open_action_ids "$EXPECTED_ACTIVATION_OPEN_ACTION_IDS" \
+    --argjson activation_action_ids "$EXPECTED_ACTIVATION_ACTION_IDS" '
+      [.[] | select(.record_type == "action")] as $actions |
+      range(0; $activation_action_ids | length) as $index |
+      ($actions | map(.action_id) | index($open_action_ids[$index])) as $open_index |
+      ($actions | map(.action_id) | index($activation_action_ids[$index])) as $activation_index |
+      select($open_index != null and $activation_index == ($open_index + 1)) |
+      [
+        $actions[$open_index].action_id,
+        $actions[$open_index].pre_state.state_path,
+        $actions[$open_index].post_state.state_path,
+        $actions[$activation_index].action_id,
+        $actions[$activation_index].pre_state.state_path,
+        $actions[$activation_index].post_state.state_path,
+        $actions[$activation_index].target_binding.element_identity
+      ] | @tsv
+    ' "$TRACE"
+)
+test "$activation_transition_count" -eq "$EXPECTED_ACTIVATION_ACTION_COUNT" ||
+  die "operator trace must contain exactly $EXPECTED_ACTIVATION_ACTION_COUNT adjacent open-to-activation transitions"
+
+noninteractive_launch_count=0
+while IFS=$'\t' read -r launch_action launch_post; do
+  noninteractive_launch_count=$((noninteractive_launch_count + 1))
+  case "$launch_post" in
+    states/[A-Za-z0-9]*.json) ;;
+    *) die "noninteractive launch references an invalid state path: $launch_post" ;;
+  esac
+  require_nonempty "$EVIDENCE_DIRECTORY/$launch_post"
+  validate_no_activation_dialog_state "$EVIDENCE_DIRECTORY/$launch_post"
+done < <(
+  jq -sr '
+    [.[] | select(.record_type == "action")][] |
+    select(.action_id == "INIT.launch-bootstrap" or .action_id == "R2.launch-baseline") |
+    [.action_id, .post_state.state_path] | @tsv
+  ' "$TRACE"
+)
+test "$noninteractive_launch_count" -eq 2 ||
+  die "operator trace must contain INIT and R2 noninteractive launch post-states"
 
 calibration_artifact_paths=()
 while IFS= read -r -d '' calibration_artifact; do
@@ -545,6 +657,7 @@ jq -e \
   --arg auditor_sha "$EXPECTED_AUDITOR_SHA" --arg calibration_checker_sha "$TRUSTED_CALIBRATION_CHECKER_SHA" \
   --arg evidence_checker_sha "$TRUSTED_EVIDENCE_CHECKER_SHA" \
   --argjson calibration_artifact_paths "$EXPECTED_CALIBRATION_ARTIFACT_PATHS" \
+  --argjson action_count "$EXPECTED_ACTION_COUNT" \
   --slurpfile guard "$GUARD" --slurpfile manifest "$MANIFEST" '
     def hex64: type == "string" and test("^[0-9a-f]{64}$");
     def absolute: type == "string" and startswith("/");
@@ -607,7 +720,7 @@ jq -e \
     .input_guard.guard_process_id == $guard[0].guard_process_id and
     .input_guard.guard_started_at_unix_ms == $guard[0].guard_started_at_unix_ms and
     .input_guard.started_after_collector_and_before_first_checkpoint == true and .input_guard.ready_confirmed == true and
-    .input_guard.inventory_action_count == 56 and .input_guard.armed_result_pairs_exactly_match_inventory == true and
+    .input_guard.inventory_action_count == $action_count and .input_guard.armed_result_pairs_exactly_match_inventory == true and
     .input_guard.all_consequential_deltas_zero == true and .input_guard.no_error_cancel_reject_or_latch == true and
     .input_guard.successful_finish_after_collector_summary == true and
     (.input_guard.calibration | keys | sort) ==
@@ -622,7 +735,7 @@ jq -e \
     .checkpoint_execution.all_action_markers_exactly_once == true and .checkpoint_execution.all_callback_windows_at_least_5000_ms == true and
     .checkpoint_execution.all_final_snapshot_quiet_periods_at_least_1000_ms == true and
     .checkpoint_execution.all_required_direct_access_then_bank_snapshots_complete == true and
-    .ui_actions.inventory_frozen_before_run == true and .ui_actions.expected_count == 56 and .ui_actions.tool_trace_count == 56 and
+    .ui_actions.inventory_frozen_before_run == true and .ui_actions.expected_count == $action_count and .ui_actions.tool_trace_count == $action_count and
     .ui_actions.all_fresh_pre_states == true and .ui_actions.all_target_bound_exactly_one_call == true and
     .ui_actions.all_fresh_action_specific_postconditions == true and .ui_actions.all_screenshot_hashes_recomputed == true and
     .ui_actions.all_state_hashes_recomputed == true and
@@ -757,12 +870,13 @@ jq -n \
   --arg audit_report_sha "$(sha256_file "$AUDIT_REPORT")" \
   --arg guard_session_id "$(jq -sr '.[0].guard_session_id' "$GUARD")" \
   --argjson guard_process_id "$(jq -sr '.[0].guard_process_id' "$GUARD")" \
-  --argjson guard_started_at "$(jq -sr '.[0].guard_started_at_unix_ms' "$GUARD")" '
+  --argjson guard_started_at "$(jq -sr '.[0].guard_started_at_unix_ms' "$GUARD")" \
+  --argjson action_count "$EXPECTED_ACTION_COUNT" '
   {
     action_evidence_report_version:2,
     status:"valid",
     run_id:$run,
-    action_count:56,
+    action_count:$action_count,
     guard_protocol_version:4,
     guard_policy:"consequential_input_only",
     guard_identity:{
@@ -835,7 +949,8 @@ cmp -s "$TRUSTED_EVIDENCE_CHECKER" "$EVIDENCE_CHECKER" || die "evidence final ch
   done
 ) | LC_ALL=C sort > "$SHA_TMP"
 
-test "$(wc -l < "$SHA_TMP" | tr -d ' ')" -eq 318 || die "detached checksum index has an unexpected entry count"
+test "$(wc -l < "$SHA_TMP" | tr -d ' ')" -eq "$EXPECTED_DETACHED_INDEX_COUNT" ||
+  die "detached checksum index has an unexpected entry count"
 (
   cd "$EVIDENCE_DIRECTORY"
   shasum -a 256 -c "$SHA_TMP" >/dev/null

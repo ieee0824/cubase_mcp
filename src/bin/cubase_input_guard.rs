@@ -6,11 +6,13 @@ use std::sync::mpsc;
 use std::thread;
 #[cfg(target_os = "macos")]
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
-const GUARD_PROTOCOL_VERSION: u32 = 3;
+const GUARD_PROTOCOL_VERSION: u32 = 4;
 const GUARD_COVERAGE: &str = "action_windows";
 const GUARD_PRIVACY: &str = "counts_and_held_state_boolean";
 const GUARD_POLICY: &str = "consequential_input_only";
@@ -89,6 +91,7 @@ enum Command {
     Arm { action_id: String },
     Check { action_id: String },
     Cancel { action_id: String },
+    Reject { action_id: String },
     Ping,
     Finish,
 }
@@ -115,6 +118,7 @@ struct ArmedAction {
 #[derive(Debug)]
 struct GuardState {
     armed: Option<ArmedAction>,
+    last_clean_result_action_id: Option<String>,
     interference_latched: bool,
     session_aborted: bool,
 }
@@ -123,6 +127,7 @@ impl GuardState {
     fn new() -> Self {
         Self {
             armed: None,
+            last_clean_result_action_id: None,
             interference_latched: false,
             session_aborted: false,
         }
@@ -135,7 +140,7 @@ impl GuardState {
                 if self.session_aborted {
                     return Err(GuardError::new(
                         "SESSION_ABORTED",
-                        "an armed action was cancelled earlier in this guard session",
+                        "an earlier action was cancelled or rejected in this guard session",
                     ));
                 }
                 if self.interference_latched {
@@ -150,6 +155,7 @@ impl GuardState {
                         format!("input guard is already armed for {}", armed.action_id),
                     ));
                 }
+                self.last_clean_result_action_id = None;
                 self.armed = Some(ArmedAction {
                     action_id: action_id.clone(),
                     counters: current,
@@ -179,6 +185,11 @@ impl GuardState {
                 let interference_detected = deltas.any_consequential();
                 self.armed = None;
                 self.interference_latched |= interference_detected;
+                self.last_clean_result_action_id = if interference_detected {
+                    None
+                } else {
+                    Some(action_id.clone())
+                };
                 Ok(json!({
                     "version": GUARD_PROTOCOL_VERSION,
                     "type": "result",
@@ -203,11 +214,58 @@ impl GuardState {
                     ));
                 }
                 self.armed = None;
+                self.last_clean_result_action_id = None;
                 self.session_aborted = true;
                 Ok(json!({
                     "version": GUARD_PROTOCOL_VERSION,
                     "type": "cancelled",
                     "action_id": action_id,
+                    "coverage": GUARD_COVERAGE,
+                    "policy": GUARD_POLICY,
+                    "session_aborted": true
+                }))
+            }
+            Command::Reject { action_id } => {
+                validate_action_id(&action_id)?;
+                if self.armed.is_some() {
+                    return Err(GuardError::new(
+                        "REJECT_WHILE_ARMED",
+                        "check the armed action before rejecting its UI postcondition",
+                    ));
+                }
+                if self.interference_latched {
+                    return Err(GuardError::new(
+                        "INTERFERENCE_LATCHED",
+                        "consequential HID input was detected during an earlier armed action window",
+                    ));
+                }
+                if self.session_aborted {
+                    return Err(GuardError::new(
+                        "SESSION_ABORTED",
+                        "this guard session was already aborted",
+                    ));
+                }
+                let checked_action_id =
+                    self.last_clean_result_action_id.as_deref().ok_or_else(|| {
+                        GuardError::new(
+                            "NO_CLEAN_RESULT",
+                            "reject requires the most recent action to have a clean check result",
+                        )
+                    })?;
+                if checked_action_id != action_id {
+                    return Err(GuardError::new(
+                        "ACTION_ID_MISMATCH",
+                        "reject action_id does not match the most recent clean result",
+                    ));
+                }
+                self.last_clean_result_action_id = None;
+                self.session_aborted = true;
+                Ok(json!({
+                    "version": GUARD_PROTOCOL_VERSION,
+                    "type": "rejected",
+                    "action_id": action_id,
+                    "reason": "postcondition_failed",
+                    "after_clean_result": true,
                     "coverage": GUARD_COVERAGE,
                     "policy": GUARD_POLICY,
                     "session_aborted": true
@@ -239,7 +297,7 @@ impl GuardState {
                 if self.session_aborted {
                     return Err(GuardError::new(
                         "SESSION_ABORTED",
-                        "an armed action was cancelled earlier in this guard session",
+                        "an earlier action was cancelled or rejected in this guard session",
                     ));
                 }
                 Ok(json!({
@@ -315,6 +373,7 @@ fn parse_command(line: &[u8]) -> Result<Command, GuardError> {
         ("arm", Some(action_id)) => Ok(Command::Arm { action_id }),
         ("check", Some(action_id)) => Ok(Command::Check { action_id }),
         ("cancel", Some(action_id)) => Ok(Command::Cancel { action_id }),
+        ("reject", Some(action_id)) => Ok(Command::Reject { action_id }),
         ("ping", None) => Ok(Command::Ping),
         ("finish", None) => Ok(Command::Finish),
         _ => Err(GuardError::new(
@@ -356,7 +415,59 @@ fn read_bounded_line(reader: &mut impl BufRead, maximum: usize) -> io::Result<Op
     }
 }
 
-fn emit(value: &Value) -> io::Result<()> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GuardSessionIdentity {
+    session_id: String,
+    process_id: u32,
+    started_at_unix_ms: u64,
+}
+
+impl GuardSessionIdentity {
+    fn new() -> Result<Self, GuardError> {
+        let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_| {
+            GuardError::new("CLOCK_ERROR", "system time is earlier than the Unix epoch")
+        })?;
+        let started_at_unix_ms = u64::try_from(elapsed.as_millis()).map_err(|_| {
+            GuardError::new("CLOCK_ERROR", "system time does not fit in milliseconds")
+        })?;
+        let process_id = std::process::id();
+        let material = format!("{process_id}:{}", elapsed.as_nanos());
+        let digest = Sha256::digest(material.as_bytes());
+        let mut session_id = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            use std::fmt::Write as _;
+            write!(&mut session_id, "{byte:02x}").expect("writing to a String cannot fail");
+        }
+        Ok(Self {
+            session_id,
+            process_id,
+            started_at_unix_ms,
+        })
+    }
+}
+
+fn decorate_session_record(
+    mut value: Value,
+    identity: &GuardSessionIdentity,
+    record_sequence: u64,
+) -> Value {
+    let object = value
+        .as_object_mut()
+        .expect("guard records are always JSON objects");
+    object.insert(
+        "guard_session_id".into(),
+        Value::String(identity.session_id.clone()),
+    );
+    object.insert("guard_process_id".into(), Value::from(identity.process_id));
+    object.insert(
+        "guard_started_at_unix_ms".into(),
+        Value::from(identity.started_at_unix_ms),
+    );
+    object.insert("record_sequence".into(), Value::from(record_sequence));
+    value
+}
+
+fn emit_raw(value: &Value) -> io::Result<()> {
     let stdout = io::stdout();
     let mut lock = stdout.lock();
     serde_json::to_writer(&mut lock, value)?;
@@ -364,17 +475,46 @@ fn emit(value: &Value) -> io::Result<()> {
     lock.flush()
 }
 
+struct GuardOutput {
+    identity: GuardSessionIdentity,
+    next_record_sequence: u64,
+}
+
+impl GuardOutput {
+    fn new(identity: GuardSessionIdentity) -> Self {
+        Self {
+            identity,
+            next_record_sequence: 1,
+        }
+    }
+
+    fn emit(&mut self, value: Value) -> io::Result<()> {
+        let record = decorate_session_record(value, &self.identity, self.next_record_sequence);
+        emit_raw(&record)?;
+        self.next_record_sequence += 1;
+        Ok(())
+    }
+}
+
 fn main() -> ExitCode {
-    match run() {
+    let identity = match GuardSessionIdentity::new() {
+        Ok(identity) => identity,
+        Err(error) => {
+            eprintln!("cubase_input_guard: {}: {}", error.code, error.message);
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut output = GuardOutput::new(identity);
+    match run(&mut output) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            let _ = emit(&error.as_json());
+            let _ = output.emit(error.as_json());
             ExitCode::FAILURE
         }
     }
 }
 
-fn run() -> Result<(), GuardError> {
+fn run(output: &mut GuardOutput) -> Result<(), GuardError> {
     if !counter_source_supported() {
         return Err(GuardError::new(
             "NOT_SUPPORTED",
@@ -383,15 +523,16 @@ fn run() -> Result<(), GuardError> {
     }
 
     sample_input_counters()?;
-    emit(&json!({
-        "version": GUARD_PROTOCOL_VERSION,
-        "type": "ready",
-        "source": "hid_system_state",
-        "privacy": GUARD_PRIVACY,
-        "coverage": GUARD_COVERAGE,
-        "policy": GUARD_POLICY
-    }))
-    .map_err(|error| GuardError::new("OUTPUT_ERROR", error.to_string()))?;
+    output
+        .emit(json!({
+            "version": GUARD_PROTOCOL_VERSION,
+            "type": "ready",
+            "source": "hid_system_state",
+            "privacy": GUARD_PRIVACY,
+            "coverage": GUARD_COVERAGE,
+            "policy": GUARD_POLICY
+        }))
+        .map_err(|error| GuardError::new("OUTPUT_ERROR", error.to_string()))?;
 
     let stdin = io::stdin();
     let mut reader = stdin.lock();
@@ -410,7 +551,9 @@ fn run() -> Result<(), GuardError> {
             InputCounters::default()
         };
         let response = state.handle(command, counters)?;
-        emit(&response).map_err(|error| GuardError::new("OUTPUT_ERROR", error.to_string()))?;
+        output
+            .emit(response)
+            .map_err(|error| GuardError::new("OUTPUT_ERROR", error.to_string()))?;
         if finishing {
             return Ok(());
         }
@@ -716,6 +859,12 @@ mod tests {
                 action_id: "S3-delete".into()
             }
         );
+        assert_eq!(
+            parse_command(br#"{"command":"reject","action_id":"S3-delete"}"#).unwrap(),
+            Command::Reject {
+                action_id: "S3-delete".into()
+            }
+        );
         assert!(parse_command(br#"{"command":"arm","action_id":""}"#).is_ok());
         assert!(parse_command(br#"{"command":"ping","extra":true}"#).is_err());
         assert!(parse_command(&vec![b'x'; MAX_COMMAND_BYTES + 1]).is_err());
@@ -846,6 +995,116 @@ mod tests {
     }
 
     #[test]
+    fn clean_result_can_be_rejected_when_the_ui_postcondition_fails() {
+        let baseline = counters(10, 20);
+        let mut state = GuardState::new();
+        assert_eq!(
+            state
+                .handle(
+                    Command::Reject {
+                        action_id: "wrong-target".into()
+                    },
+                    InputCounters::default()
+                )
+                .unwrap_err()
+                .code,
+            "NO_CLEAN_RESULT"
+        );
+        state
+            .handle(
+                Command::Arm {
+                    action_id: "wrong-target".into(),
+                },
+                baseline,
+            )
+            .unwrap();
+        assert_eq!(
+            state
+                .handle(
+                    Command::Reject {
+                        action_id: "wrong-target".into()
+                    },
+                    InputCounters::default()
+                )
+                .unwrap_err()
+                .code,
+            "REJECT_WHILE_ARMED"
+        );
+        let checked = state
+            .handle(
+                Command::Check {
+                    action_id: "wrong-target".into(),
+                },
+                baseline,
+            )
+            .unwrap();
+        assert_eq!(checked["interference_detected"], false);
+        assert_eq!(
+            state
+                .handle(
+                    Command::Reject {
+                        action_id: "other".into()
+                    },
+                    InputCounters::default()
+                )
+                .unwrap_err()
+                .code,
+            "ACTION_ID_MISMATCH"
+        );
+        let rejected = state
+            .handle(
+                Command::Reject {
+                    action_id: "wrong-target".into(),
+                },
+                InputCounters::default(),
+            )
+            .unwrap();
+        assert_eq!(rejected["type"], "rejected");
+        assert_eq!(rejected["reason"], "postcondition_failed");
+        assert_eq!(rejected["after_clean_result"], true);
+        assert_eq!(rejected["session_aborted"], true);
+        assert_eq!(
+            state
+                .handle(Command::Finish, InputCounters::default())
+                .unwrap_err()
+                .code,
+            "SESSION_ABORTED"
+        );
+    }
+
+    #[test]
+    fn session_identity_is_added_to_every_emitted_record() {
+        let identity = GuardSessionIdentity {
+            session_id: "a".repeat(64),
+            process_id: 42,
+            started_at_unix_ms: 1_788_000_000_123,
+        };
+        let record = decorate_session_record(
+            json!({"version": GUARD_PROTOCOL_VERSION, "type": "ready"}),
+            &identity,
+            7,
+        );
+        assert_eq!(record["guard_session_id"], "a".repeat(64));
+        assert_eq!(record["guard_process_id"], 42);
+        assert_eq!(record["guard_started_at_unix_ms"], 1_788_000_000_123_u64);
+        assert_eq!(record["record_sequence"], 7);
+    }
+
+    #[test]
+    fn generated_session_identity_has_a_bounded_correlation_shape() {
+        let identity = GuardSessionIdentity::new().unwrap();
+        assert_eq!(identity.session_id.len(), 64);
+        assert!(
+            identity
+                .session_id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+        assert_eq!(identity.process_id, std::process::id());
+        assert!(identity.started_at_unix_ms > 0);
+    }
+
+    #[test]
     fn finish_requires_a_clean_unarmed_session() {
         let baseline = counters(10, 20);
         let mut state = GuardState::new();
@@ -923,6 +1182,12 @@ mod tests {
         assert!(
             !Command::Cancel {
                 action_id: "cancel".into()
+            }
+            .requires_counter_sample()
+        );
+        assert!(
+            !Command::Reject {
+                action_id: "reject".into()
             }
             .requires_counter_sample()
         );

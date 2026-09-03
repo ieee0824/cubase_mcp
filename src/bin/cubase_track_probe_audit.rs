@@ -212,8 +212,14 @@ impl Profile {
         }
     }
 
-    fn accepts_probe_host_version(self, actual: &str) -> bool {
-        actual == self.expected_probe_host_version() || actual == self.expected_host().1
+    fn accepts_probe_host_version(self, actual: &Value) -> bool {
+        match actual {
+            Value::String(actual) => {
+                actual == self.expected_probe_host_version() || actual == self.expected_host().1
+            }
+            Value::Null => matches!(self, Self::C13MixerBank),
+            _ => false,
+        }
     }
 
     const fn requires_direct_access(self) -> bool {
@@ -5797,7 +5803,6 @@ fn validate_capabilities(profile: Profile, result: &Value) -> AuditResult<bool> 
         || object.get("integrity_failed").and_then(Value::as_bool) != Some(false)
         || !object
             .get("host_version")
-            .and_then(Value::as_str)
             .is_some_and(|version| profile.accepts_probe_host_version(version))
     {
         return Err(AuditError::new("CAPABILITY_RESULT_INVALID"));
@@ -7166,7 +7171,10 @@ mod tests {
             json!({
                 "read_only": true,
                 "integrity_failed": false,
-                "host_version": profile.expected_probe_host_version(),
+                "host_version": match profile {
+                    Profile::C13MixerBank => Value::Null,
+                    Profile::C15Combined => Value::String(profile.expected_probe_host_version().into()),
+                },
                 "data_minimization": {
                     "source_redaction": true,
                     "fixture_revision": 2,
@@ -8620,22 +8628,31 @@ mod tests {
     }
 
     #[test]
-    fn probe_host_version_accepts_only_the_profile_semantic_or_exact_build() {
-        assert!(Profile::C13MixerBank.accepts_probe_host_version("13.0.30"));
-        assert!(Profile::C13MixerBank.accepts_probe_host_version("13.0.30.226"));
-        assert!(!Profile::C13MixerBank.accepts_probe_host_version("13.0.30.999"));
-        assert!(!Profile::C13MixerBank.accepts_probe_host_version("13.0.31"));
-        assert!(!Profile::C13MixerBank.accepts_probe_host_version("13.0.30-beta"));
-        assert!(!Profile::C13MixerBank.accepts_probe_host_version("13.0.30.226-extra"));
-        assert!(!Profile::C13MixerBank.accepts_probe_host_version("15.0.30"));
+    fn probe_host_version_accepts_only_profile_allowed_values() {
+        let accepts = |profile: Profile, value: Value| profile.accepts_probe_host_version(&value);
+        assert!(accepts(Profile::C13MixerBank, json!("13.0.30")));
+        assert!(accepts(Profile::C13MixerBank, json!("13.0.30.226")));
+        assert!(accepts(Profile::C13MixerBank, Value::Null));
+        assert!(!accepts(Profile::C13MixerBank, json!("13.0.30.999")));
+        assert!(!accepts(Profile::C13MixerBank, json!("13.0.31")));
+        assert!(!accepts(Profile::C13MixerBank, json!("13.0.30-beta")));
+        assert!(!accepts(Profile::C13MixerBank, json!("13.0.30.226-extra")));
+        assert!(!accepts(Profile::C13MixerBank, json!(" 13.0.30")));
+        assert!(!accepts(Profile::C13MixerBank, json!(13)));
+        assert!(!accepts(Profile::C13MixerBank, json!({})));
+        assert!(!accepts(Profile::C13MixerBank, json!("15.0.30")));
 
-        assert!(Profile::C15Combined.accepts_probe_host_version("15.0.30"));
-        assert!(Profile::C15Combined.accepts_probe_host_version("15.0.30.287"));
-        assert!(!Profile::C15Combined.accepts_probe_host_version("15.0.30.999"));
-        assert!(!Profile::C15Combined.accepts_probe_host_version("15.0.31"));
-        assert!(!Profile::C15Combined.accepts_probe_host_version("15.0.30-beta"));
-        assert!(!Profile::C15Combined.accepts_probe_host_version("15.0.30.287-extra"));
-        assert!(!Profile::C15Combined.accepts_probe_host_version("13.0.30"));
+        assert!(accepts(Profile::C15Combined, json!("15.0.30")));
+        assert!(accepts(Profile::C15Combined, json!("15.0.30.287")));
+        assert!(!accepts(Profile::C15Combined, Value::Null));
+        assert!(!accepts(Profile::C15Combined, json!("15.0.30.999")));
+        assert!(!accepts(Profile::C15Combined, json!("15.0.31")));
+        assert!(!accepts(Profile::C15Combined, json!("15.0.30-beta")));
+        assert!(!accepts(Profile::C15Combined, json!("15.0.30.287-extra")));
+        assert!(!accepts(Profile::C15Combined, json!("15.0.30 ")));
+        assert!(!accepts(Profile::C15Combined, json!(15)));
+        assert!(!accepts(Profile::C15Combined, json!([])));
+        assert!(!accepts(Profile::C15Combined, json!("13.0.30")));
     }
 
     #[test]

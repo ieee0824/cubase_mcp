@@ -633,6 +633,7 @@ function testApi11MixerBanksCommandsAndOverflow() {
     const capability = events(harness, 'probe.capabilities').at(-1)
     assert.equal(loaded.data.probe_session_id, envelopes(harness)[0].source_instance_id)
     assert.equal(events(harness, 'probe.ready').length, 0)
+    assert.equal(capability.data.host_version, null)
     assert.equal(capability.data.direct_access.supported, false)
     assert.equal(
         capability.data.direct_access.projection,
@@ -956,6 +957,10 @@ function testSnapshotQueuesAreBoundedAndDeactivationIsFailClosed() {
         graph: { base: 0, children: { 0: [] }, metadata: {} }
     })
     initializing.activate()
+    assert.equal(
+        events(initializing, 'probe.capabilities').at(-1).data.host_version,
+        '15.0.30'
+    )
     assert.deepEqual(
         Array.from(
             initializing.context.pendingDirectAccessSnapshots,

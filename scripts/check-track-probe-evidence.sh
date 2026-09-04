@@ -2,13 +2,14 @@
 set -euo pipefail
 
 EXPECTED_ACTION_COUNT=63
+EXPECTED_CHECKPOINT_COUNT=44
 EXPECTED_TRACE_RECORD_COUNT=$((EXPECTED_ACTION_COUNT + 2))
 EXPECTED_CAPTURE_COUNT=$((EXPECTED_ACTION_COUNT * 2))
 EXPECTED_CLICK_ACTION_COUNT=46
 EXPECTED_ACTIVATION_ACTION_COUNT=7
-# The detached index has 94 non-formal-capture entries. Each formal action
+# The detached index has 101 non-formal-capture entries. Each formal action
 # contributes two screenshots and two state dumps.
-EXPECTED_NON_CAPTURE_INDEX_ENTRY_COUNT=94
+EXPECTED_NON_CAPTURE_INDEX_ENTRY_COUNT=101
 EXPECTED_DETACHED_INDEX_COUNT=$((EXPECTED_NON_CAPTURE_INDEX_ENTRY_COUNT + EXPECTED_ACTION_COUNT * 4))
 CALIBRATION_PREFIX='cmcp-calibration'
 EXPECTED_ACTIVATION_DIALOG_TEXT='プロジェクトをアクティブにしますか？'
@@ -215,21 +216,30 @@ jq -e \
 test "$(git -C "$REPOSITORY_ROOT" rev-parse HEAD)" = "$EXPECTED_COMMIT" || die "repository commit drifted after inventory freeze"
 test -z "$(git -C "$REPOSITORY_ROOT" status --short)" || die "repository worktree is not clean"
 
-# Rebuild the auditor from the clean, inventory-bound commit in an isolated
-# target directory. The run record cannot establish trust by merely asserting
-# the digest of an untracked target/release executable.
-REPRO_BUILD_DIRECTORY=$(mktemp -d "${TMPDIR:-/tmp}/cmcp-auditor-build.XXXXXX")
+# Rebuild all evidence-producing/consuming binaries from the clean,
+# inventory-bound commit in an isolated target directory. The run record
+# cannot establish trust by merely asserting digests of untracked
+# target/release executables.
+REPRO_BUILD_DIRECTORY=$(mktemp -d "${TMPDIR:-/tmp}/cmcp-evidence-build.XXXXXX")
 trap 'rm -rf "$REPRO_BUILD_DIRECTORY"' EXIT HUP INT TERM
 (
   cd "$REPOSITORY_ROOT"
   unset RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
   CARGO_TARGET_DIR="$REPRO_BUILD_DIRECTORY" cargo build \
     --manifest-path "$REPOSITORY_ROOT/Cargo.toml" \
-    --release --locked --offline --bin cubase_track_probe_audit --quiet
+    --release --locked --offline \
+    --bin cubase_input_guard \
+    --bin cubase_track_probe_audit \
+    --bin cubase_track_probe_collector \
+    --quiet
 ) ||
-  die "failed to rebuild the auditor from the inventory-bound commit"
+  die "failed to rebuild the guard, auditor, and collector from the inventory-bound commit"
 REBUILT_AUDITOR="$REPRO_BUILD_DIRECTORY/release/cubase_track_probe_audit"
+REBUILT_COLLECTOR="$REPRO_BUILD_DIRECTORY/release/cubase_track_probe_collector"
+REBUILT_GUARD="$REPRO_BUILD_DIRECTORY/release/cubase_input_guard"
 test -x "$REBUILT_AUDITOR" || die "isolated auditor rebuild did not produce an executable"
+test -x "$REBUILT_COLLECTOR" || die "isolated collector rebuild did not produce an executable"
+test -x "$REBUILT_GUARD" || die "isolated input-guard rebuild did not produce an executable"
 
 EXPECTED_INVENTORY_SHA=$(sha256_file "$INVENTORY")
 EXPECTED_COLLECTOR_SHA=$(jq -er '.digests.collector_binary_sha256' "$RUN_RECORD") || die "collector digest is missing from run record"
@@ -244,6 +254,10 @@ done
 test "$(sha256_file "$GUARD_BINARY")" = "$EXPECTED_GUARD_SHA" || die "guard binary digest mismatch"
 test "$(sha256_file "$COLLECTOR")" = "$EXPECTED_COLLECTOR_SHA" || die "collector binary digest mismatch"
 test "$(sha256_file "$AUDITOR")" = "$EXPECTED_AUDITOR_SHA" || die "auditor binary digest mismatch"
+test "$(sha256_file "$REBUILT_GUARD")" = "$EXPECTED_GUARD_SHA" || die "guard digest does not match isolated clean-commit rebuild"
+cmp -s "$GUARD_BINARY" "$REBUILT_GUARD" || die "release guard differs from isolated clean-commit rebuild"
+test "$(sha256_file "$REBUILT_COLLECTOR")" = "$EXPECTED_COLLECTOR_SHA" || die "collector digest does not match isolated clean-commit rebuild"
+cmp -s "$COLLECTOR" "$REBUILT_COLLECTOR" || die "release collector differs from isolated clean-commit rebuild"
 test "$(sha256_file "$REBUILT_AUDITOR")" = "$EXPECTED_AUDITOR_SHA" || die "auditor digest does not match isolated clean-commit rebuild"
 cmp -s "$AUDITOR" "$REBUILT_AUDITOR" || die "release auditor differs from isolated clean-commit rebuild"
 test "$(sha256_file "$PROBE_SOURCE")" = "$EXPECTED_PROBE_SHA" || die "probe source digest mismatch"
@@ -260,7 +274,7 @@ jq -e \
   --argjson click_action_count "$EXPECTED_CLICK_ACTION_COUNT" '
     .ui_action_inventory_version == 1 and .inventory_state == "frozen" and
     .run_id == $run and .profile == $profile and .fixture_revision == 2 and .repository_commit == $commit and
-    .guard.protocol_version == 4 and .guard.source == "hid_system_state" and
+    .guard.protocol_version == 5 and .guard.source == "hid_system_state" and
     .guard.coverage == "action_windows" and .guard.privacy == "counts_and_held_state_boolean" and
     .guard.policy == "consequential_input_only" and .guard.binary_sha256 == $guard_sha and
     .rules.one_injected_call_per_action == true and
@@ -327,21 +341,43 @@ jq -s -e --argjson action_count "$EXPECTED_ACTION_COUNT" '
   ($ready.guard_process_id | type == "number" and . > 0 and floor == .) and
   ($ready.guard_started_at_unix_ms | type == "number" and . > 0 and floor == .) and
   all(.[];
-    .version == 4 and .coverage == "action_windows" and .policy == "consequential_input_only" and
-    .guard_session_id == $session_id and .guard_process_id == $process_id and .guard_started_at_unix_ms == $started_at
+    .version == 5 and .coverage == "action_windows" and .policy == "consequential_input_only" and
+    .guard_session_id == $session_id and .guard_process_id == $process_id and .guard_started_at_unix_ms == $started_at and
+    (.recorded_at_unix_ms | type == "number" and . >= $started_at and floor == .)
   ) and
   ([.[].record_sequence] == [range(1; length + 1)]) and
+  all(range(1; length); . as $i |
+    $records[$i - 1].recorded_at_unix_ms <= $records[$i].recorded_at_unix_ms and
+    (if ($records[$i] | has("sample_started_at_unix_ms")) then
+       $records[$i - 1].recorded_at_unix_ms <= $records[$i].sample_started_at_unix_ms
+     else true end)
+  ) and
   .[-1].type == "finished" and .[-1].source == "hid_system_state" and .[-1].interference_detected == false and
   ([.[] | select(.type == "error" or .type == "cancelled" or .type == "rejected" or .type == "pong")] | length) == 0 and
   ([.[] | select(.type == "armed")] | length) == $action_count and
   ([.[] | select(.type == "result")] | length) == $action_count and
   all(.[] | select(.type == "result");
-    .source == "hid_system_state" and .interference_detected == false and
-    (.deltas | keys | sort) == counter_keys and
-    all(.deltas[]; type == "number" and . >= 0 and floor == . and . <= 4294967295) and
-    all(.deltas | to_entries[] | select(.key != "mouse_moved"); .value == 0)
+    . as $record |
+    $record.sample_started_at_unix_ms as $sample_started |
+    $record.sample_completed_at_unix_ms as $sample_completed |
+    $record.source == "hid_system_state" and $record.interference_detected == false and
+    ($sample_started | type == "number" and . >= $started_at and floor == .) and
+    ($sample_completed | type == "number" and . >= $sample_started and floor == .) and
+    $sample_completed <= $record.recorded_at_unix_ms and
+    ($record.deltas | keys | sort) == counter_keys and
+    all($record.deltas[]; type == "number" and . >= 0 and floor == . and . <= 4294967295) and
+    all($record.deltas | to_entries[] | select(.key != "mouse_moved"); .value == 0)
+  ) and
+  all(.[] | select(.type == "armed");
+    . as $record |
+    $record.sample_started_at_unix_ms as $sample_started |
+    $record.sample_completed_at_unix_ms as $sample_completed |
+    $record.source == "hid_system_state" and
+    ($sample_started | type == "number" and . >= $started_at and floor == .) and
+    ($sample_completed | type == "number" and . >= $sample_started and floor == .) and
+    $sample_completed <= $record.recorded_at_unix_ms
   )
-' "$GUARD" >/dev/null || die "formal guard v4 contract, identity, sequence, or deltas invalid"
+' "$GUARD" >/dev/null || die "formal guard v5 contract, identity, sequence, sampling times, or deltas invalid"
 
 jq -s -e --argjson action_count "$EXPECTED_ACTION_COUNT" --slurpfile inventory "$INVENTORY" '
   . as $records |
@@ -488,6 +524,115 @@ jq -s -e --slurpfile guard "$GUARD" --slurpfile inventory "$INVENTORY" --slurpfi
     .pre_state.app == $expected_ui_app and .post_state.app == "Finder") and
   all(.[]; (has("retry_attempted") | not) and (has("completed_without_retry") | not))
 ' "$TRACE" >/dev/null || die "operator tool trace or guard identity binding invalid"
+
+# Convert the operator RFC 3339 timestamps to the same Unix-millisecond clock
+# used by the trusted guard and collector. This binds each UI action to both
+# its live guard sampling window and the corresponding collector checkpoint;
+# ordering inside the operator-authored trace alone is not sufficient.
+ACTION_TIME_BINDING_FILTER='
+  def leap($year): ($year % 4 == 0) and (($year % 100 != 0) or ($year % 400 == 0));
+  def days_in_month($year; $month):
+    if $month == 2 then (if leap($year) then 29 else 28 end)
+    elif ($month == 4 or $month == 6 or $month == 9 or $month == 11) then 30
+    else 31 end;
+  def days_before_month($year; $month):
+    reduce range(1; $month) as $candidate (0; . + days_in_month($year; $candidate));
+  def leap_days_before($year):
+    (((($year - 1) / 4) | floor) - ((1969 / 4) | floor))
+    - (((($year - 1) / 100) | floor) - ((1969 / 100) | floor))
+    + (((($year - 1) / 400) | floor) - ((1969 / 400) | floor));
+  def rfc3339_unix_ms:
+    (try capture("^(?<year>[0-9]{4})-(?<month>[0-9]{2})-(?<day>[0-9]{2})T(?<hour>[0-9]{2}):(?<minute>[0-9]{2}):(?<second>[0-9]{2})\\.(?<millisecond>[0-9]{3})(?<zone>Z|(?<sign>[+-])(?<zone_hour>[0-9]{2}):(?<zone_minute>[0-9]{2}))$") catch null) as $parts |
+    if $parts == null then null else
+      ($parts.year | tonumber) as $year |
+      ($parts.month | tonumber) as $month |
+      ($parts.day | tonumber) as $day |
+      ($parts.hour | tonumber) as $hour |
+      ($parts.minute | tonumber) as $minute |
+      ($parts.second | tonumber) as $second |
+      ($parts.millisecond | tonumber) as $millisecond |
+      (if $parts.zone == "Z" then 0
+       else (($parts.zone_hour | tonumber) * 60 + ($parts.zone_minute | tonumber)) *
+         (if $parts.sign == "+" then 1 else -1 end)
+       end) as $zone_offset_minutes |
+      if $year < 1970 or $month < 1 or $month > 12 or $day < 1 or
+         $day > days_in_month($year; $month) or $hour > 23 or
+         $minute > 59 or $second > 59
+      then null
+      else
+        (((($year - 1970) * 365 + leap_days_before($year) + days_before_month($year; $month) + ($day - 1)) * 86400000)
+          + ($hour * 3600000) + ($minute * 60000) + ($second * 1000) + $millisecond
+          - ($zone_offset_minutes * 60000))
+      end
+    end;
+  def integer_ms:
+    type == "number" and . >= 0 and floor == .;
+  . as $trace |
+  [$trace[] | select(.record_type == "action")] as $actions |
+  [$raw[] | select(.record_type == "collector_started")] as $collector_started |
+  [$raw[] | select(.record_type == "collector_summary")] as $collector_summary |
+  [$raw[] | select(.record_type == "collector_checkpoint" and .phase == "begin")] as $checkpoint_begins |
+  [$raw[] | select(.record_type == "collector_action" and .phase == "marked")] as $action_markers |
+  [$raw[] | select(.record_type == "collector_checkpoint" and .phase == "end")] as $checkpoint_ends |
+  [$guard[] | select(.type == "armed")] as $armed_records |
+  [$guard[] | select(.type == "result")] as $result_records |
+  ($trace[0].started_at | rfc3339_unix_ms) as $trace_started_at |
+  ($trace[-1].ended_at | rfc3339_unix_ms) as $trace_ended_at |
+  ($actions[0].pre_state.captured_at | rfc3339_unix_ms) as $first_pre |
+  ($actions[-1].post_state.captured_at | rfc3339_unix_ms) as $last_post |
+  ($collector_started | length) == 1 and ($collector_summary | length) == 1 and
+  ($checkpoint_begins | length) == $checkpoint_count and
+  ($action_markers | length) == $checkpoint_count and
+  ($checkpoint_ends | length) == $checkpoint_count and
+  (($checkpoint_begins | map(.checkpoint_id) | unique | length) == $checkpoint_count) and
+  (($action_markers | map(.checkpoint_id) | unique | length) == $checkpoint_count) and
+  (($checkpoint_ends | map(.checkpoint_id) | unique | length) == $checkpoint_count) and
+  ($actions | length) == $action_count and
+  ($armed_records | length) == $action_count and
+  ($result_records | length) == $action_count and
+  all($raw[] | .timestamp_unix_ms; integer_ms) and
+  ($trace_started_at | integer_ms) and ($trace_ended_at | integer_ms) and
+  ($first_pre | integer_ms) and ($last_post | integer_ms) and
+  $collector_started[0].timestamp_unix_ms <= $trace_started_at and
+  $collector_started[0].timestamp_unix_ms <= $guard[0].recorded_at_unix_ms and
+  $guard[0].recorded_at_unix_ms <= $checkpoint_begins[0].timestamp_unix_ms and
+  $last_post <= $collector_summary[0].timestamp_unix_ms and
+  $collector_summary[0].timestamp_unix_ms <= $guard[-1].recorded_at_unix_ms and
+  $guard[-1].recorded_at_unix_ms <= $trace_ended_at and
+  all(range(0; $action_count); . as $index |
+    $actions[$index] as $action |
+    $armed_records[$index] as $armed |
+    $result_records[$index] as $result |
+    [$checkpoint_begins[] | select(.checkpoint_id == $action.checkpoint_id)] as $begins |
+    [$action_markers[] | select(.checkpoint_id == $action.checkpoint_id)] as $markers |
+    [$checkpoint_ends[] | select(.checkpoint_id == $action.checkpoint_id)] as $ends |
+    ($action.pre_state.captured_at | rfc3339_unix_ms) as $pre |
+    ($action.call_started_at | rfc3339_unix_ms) as $call_started |
+    ($action.call_ended_at | rfc3339_unix_ms) as $call_ended |
+    ($action.post_state.captured_at | rfc3339_unix_ms) as $post |
+    ($begins | length) == 1 and ($markers | length) == 1 and ($ends | length) == 1 and
+    $armed.action_id == $action.action_id and $result.action_id == $action.action_id and
+    ($pre | integer_ms) and ($call_started | integer_ms) and
+    ($call_ended | integer_ms) and ($post | integer_ms) and
+    $begins[0].timestamp_unix_ms <= $markers[0].timestamp_unix_ms and
+    $markers[0].timestamp_unix_ms <= $armed.sample_started_at_unix_ms and
+    $armed.sample_started_at_unix_ms <= $armed.sample_completed_at_unix_ms and
+    $armed.sample_completed_at_unix_ms <= $armed.recorded_at_unix_ms and
+    $armed.recorded_at_unix_ms <= $pre and
+    $pre < $call_started and $call_started <= $call_ended and $call_ended < $post and
+    $post <= $result.sample_started_at_unix_ms and
+    $result.sample_started_at_unix_ms <= $result.sample_completed_at_unix_ms and
+    $result.sample_completed_at_unix_ms <= $result.recorded_at_unix_ms and
+    $result.recorded_at_unix_ms <= $ends[0].timestamp_unix_ms
+  )
+'
+
+jq -s -e \
+  --argjson action_count "$EXPECTED_ACTION_COUNT" \
+  --argjson checkpoint_count "$EXPECTED_CHECKPOINT_COUNT" \
+  --slurpfile guard "$GUARD" --slurpfile raw "$RAW" \
+  "$ACTION_TIME_BINDING_FILTER" "$TRACE" >/dev/null ||
+  die "operator actions are not contained by their guard samples and collector checkpoint windows"
 
 SCREENSHOT_REFS=$(jq -sc '
   [.[] | select(.record_type == "action") |
@@ -715,7 +860,7 @@ jq -e \
     (.collector.first_timestamp_unix_ms | type == "number" and floor == .) and
     .collector.same_process_for_entire_run == true and .collector.summary_integrity_ok == true and
     .collector.summary_exit_ok == true and .collector.summary_exit_reason == "stdin_eof" and
-    .input_guard.protocol_version == 4 and .input_guard.same_process_for_entire_run == true and
+    .input_guard.protocol_version == 5 and .input_guard.same_process_for_entire_run == true and
     .input_guard.guard_session_id == $guard[0].guard_session_id and
     .input_guard.guard_process_id == $guard[0].guard_process_id and
     .input_guard.guard_started_at_unix_ms == $guard[0].guard_started_at_unix_ms and
@@ -724,9 +869,9 @@ jq -e \
     .input_guard.all_consequential_deltas_zero == true and .input_guard.no_error_cancel_reject_or_latch == true and
     .input_guard.successful_finish_after_collector_summary == true and
     (.input_guard.calibration | keys | sort) ==
-      (["artifact_paths","exact_automation_context_negative_matrix","physical_click_rejection","physical_drag_rejection","physical_key_rejection","physical_move_only_acceptance","physical_scroll_rejection","wrong_coordinate_clean_guard_but_failed_postcondition_rejection"] | sort) and
+      (["artifact_paths","exact_automation_context_negative_matrix","held_state_rejection","physical_click_rejection","physical_drag_rejection","physical_key_rejection","physical_move_only_acceptance","physical_scroll_rejection","sample_race_rejection","wrong_coordinate_clean_guard_but_failed_postcondition_rejection"] | sort) and
     all(.input_guard.calibration | to_entries[] | select(.key != "artifact_paths"); .value == "passed") and
-    (.input_guard.calibration.artifact_paths | type == "array" and length == 80 and
+    (.input_guard.calibration.artifact_paths | type == "array" and length == 87 and
       all(.[]; type == "string" and test("^calibration/[A-Za-z0-9][A-Za-z0-9._/-]*$") and (contains("..") | not)) and
       (unique | length) == length and (sort == $calibration_artifact_paths)) and
     .checkpoint_execution.expected_order == ($manifest[0].annotations | map(.checkpoint_id)) and
@@ -790,9 +935,9 @@ bash "$TRUSTED_CALIBRATION_CHECKER" "$CALIBRATION_DIRECTORY" "$CALIBRATION_PREFI
 jq -s -e \
   --arg guard_sha "$EXPECTED_GUARD_SHA" --arg checker_sha "$TRUSTED_CALIBRATION_CHECKER_SHA" '
     length == 1 and (.[0] |
-    .calibration_report_version == 2 and .status == "valid" and .file_prefix == "cmcp-calibration" and
+    .calibration_report_version == 3 and .status == "valid" and .file_prefix == "cmcp-calibration" and
     .guard_contract == {
-      version:4, source:"hid_system_state", coverage:"action_windows",
+      version:5, source:"hid_system_state", coverage:"action_windows",
       privacy:"counts_and_held_state_boolean", policy:"consequential_input_only", binary_sha256:$guard_sha
     } and
     .checker_sha256 == $checker_sha and
@@ -801,9 +946,14 @@ jq -s -e \
     .controls.move_only_acceptance == ["semantic_target_binding","coordinate_target_binding"] and
     .controls.consequential_positive == ["physical_click","physical_key","physical_scroll","physical_drag"] and
     .controls.target_binding_rejection == "wrong_valid_coordinate_rejected_after_clean_result" and
-    (.controls.sample_guard_rejection == "held_state" or .controls.sample_guard_rejection == "sample_race") and
-    .fresh_guard_identity_count == 8 and (.guard_sessions | length) == 8 and
-    (.evidence_sha256 | keys | sort) == (["automation","move","positive-click","positive-drag","positive-key","positive-scroll","sample-rejection","wrong-target"] | sort) and
+    (.controls.held_state_rejection.mode == "held_state") and
+    (.controls.held_state_rejection.error_code == "KEY_HELD" or .controls.held_state_rejection.error_code == "MOUSE_BUTTON_HELD") and
+    (if .controls.held_state_rejection.error_code == "KEY_HELD" then
+       .controls.held_state_rejection.physical_input_kind == "keyboard_key_held"
+     else .controls.held_state_rejection.physical_input_kind == "mouse_button_held" end) and
+    .controls.sample_race_rejection == {mode:"sample_race",error_code:"INPUT_DURING_SAMPLE",physical_input_kind:"pointer_move_during_sample"} and
+    .fresh_guard_identity_count == 9 and (.guard_sessions | length) == 9 and
+    (.evidence_sha256 | keys | sort) == (["automation","held-state-rejection","move","positive-click","positive-drag","positive-key","positive-scroll","sample-race-rejection","wrong-target"] | sort) and
     all(.evidence_sha256[];
       (.guard_jsonl | test("^[0-9a-f]{64}$")) and (.guard_stderr | test("^[0-9a-f]{64}$")) and
       (.operator_trace_jsonl | test("^[0-9a-f]{64}$"))
@@ -818,7 +968,7 @@ jq -e \
   --arg evidence_checker_sha "$TRUSTED_EVIDENCE_CHECKER_SHA" \
   --slurpfile calibration_report "$CALIBRATION_REPORT" '
     .calibration_summary_version == 1 and .summary_state == "final" and .run_id == $run and
-    .guard_contract == {version:4,source:"hid_system_state",coverage:"action_windows",privacy:"counts_and_held_state_boolean",policy:"consequential_input_only"} and
+    .guard_contract == {version:5,source:"hid_system_state",coverage:"action_windows",privacy:"counts_and_held_state_boolean",policy:"consequential_input_only"} and
     .mechanical_validation.status == "valid" and .mechanical_validation.calibration_directory == "calibration" and
     .mechanical_validation.report == "guard-calibration-report.json" and
     .mechanical_validation.checker == "check-calibration.sh" and
@@ -834,9 +984,10 @@ jq -e \
     all(.physical_controls[]; . == "passed") and
     .wrong_target_control.guard_clean == true and .wrong_target_control.postcondition_failed == true and
     .wrong_target_control.rejected_after_clean_result == true and .wrong_target_control.run_rejected == true and
-    (.sample_guard_rejection.mode == "held_state" or .sample_guard_rejection.mode == "sample_race") and
-    .sample_guard_rejection.mode == $calibration_report[0].controls.sample_guard_rejection and
-    .sample_guard_rejection.status == "passed"
+    .held_state_rejection.mode == "held_state" and .held_state_rejection.status == "passed" and
+    .held_state_rejection.error_code == $calibration_report[0].controls.held_state_rejection.error_code and
+    .held_state_rejection.physical_input_kind == $calibration_report[0].controls.held_state_rejection.physical_input_kind and
+    .sample_race_rejection == {mode:"sample_race",status:"passed",error_code:"INPUT_DURING_SAMPLE",physical_input_kind:"pointer_move_during_sample"}
   ' "$CALIBRATION_SUMMARY" >/dev/null || die "guard calibration summary is incomplete or its report digest is stale"
 
 "$REBUILT_AUDITOR" --manifest "$MANIFEST" --jsonl "$RAW" > "$AUDIT_TMP" 2> "$AUDIT_STDERR_TMP"
@@ -873,11 +1024,11 @@ jq -n \
   --argjson guard_started_at "$(jq -sr '.[0].guard_started_at_unix_ms' "$GUARD")" \
   --argjson action_count "$EXPECTED_ACTION_COUNT" '
   {
-    action_evidence_report_version:2,
+    action_evidence_report_version:3,
     status:"valid",
     run_id:$run,
     action_count:$action_count,
-    guard_protocol_version:4,
+    guard_protocol_version:5,
     guard_policy:"consequential_input_only",
     guard_identity:{
       guard_session_id:$guard_session_id,
@@ -886,6 +1037,8 @@ jq -n \
     },
     all_consequential_deltas_zero:true,
     all_actions_inventory_ordered_and_adjacent:true,
+    all_guard_sampling_windows_time_bound_to_tool_trace:true,
+    all_tool_calls_time_bound_to_collector_checkpoints_after_action_markers:true,
     all_tool_calls_fresh_target_bound_single_call_with_confirmed_postcondition:true,
     all_screenshot_digests_recomputed_from_canonical_artifacts:true,
     all_state_digests_recomputed_from_canonical_artifacts:true,
@@ -893,7 +1046,10 @@ jq -n \
     no_retry_within_process:true,
     checker_trust:{
       calibration_checker_compared_to_committed_source:true,
-      final_checker_compared_to_committed_source:true
+      final_checker_compared_to_committed_source:true,
+      guard_rebuilt_from_inventory_commit_and_bytes_matched:true,
+      collector_rebuilt_from_inventory_commit_and_bytes_matched:true,
+      auditor_rebuilt_from_inventory_commit_and_bytes_matched:true
     },
     detached_checksum_strategy:{
       path:"artifact-sha256.txt",
@@ -913,7 +1069,8 @@ jq -n \
     },
     limitations:[
       "guard identity correlates records but does not authenticate the actor or make evidence tamper-evident",
-      "the isolated auditor rebuild assumes the local Rust toolchain and Cargo home configuration are trusted"
+      "cross-artifact action-window binding assumes a trustworthy shared system wall clock",
+      "the isolated guard, auditor, and collector rebuilds assume the local Rust toolchain and Cargo home configuration are trusted"
     ]
   }' > "$ACTION_TMP"
 mv "$ACTION_TMP" "$ACTION_REPORT"
@@ -938,7 +1095,8 @@ cmp -s "$TRUSTED_EVIDENCE_CHECKER" "$EVIDENCE_CHECKER" || die "evidence final ch
     calibration/"$CALIBRATION_PREFIX"-positive-scroll.jsonl calibration/"$CALIBRATION_PREFIX"-positive-scroll.stderr calibration/"$CALIBRATION_PREFIX"-positive-scroll-trace.jsonl \
     calibration/"$CALIBRATION_PREFIX"-positive-drag.jsonl calibration/"$CALIBRATION_PREFIX"-positive-drag.stderr calibration/"$CALIBRATION_PREFIX"-positive-drag-trace.jsonl \
     calibration/"$CALIBRATION_PREFIX"-wrong-target.jsonl calibration/"$CALIBRATION_PREFIX"-wrong-target.stderr calibration/"$CALIBRATION_PREFIX"-wrong-target-trace.jsonl \
-    calibration/"$CALIBRATION_PREFIX"-sample-rejection.jsonl calibration/"$CALIBRATION_PREFIX"-sample-rejection.stderr calibration/"$CALIBRATION_PREFIX"-sample-rejection-trace.jsonl; do
+    calibration/"$CALIBRATION_PREFIX"-held-state-rejection.jsonl calibration/"$CALIBRATION_PREFIX"-held-state-rejection.stderr calibration/"$CALIBRATION_PREFIX"-held-state-rejection-trace.jsonl \
+    calibration/"$CALIBRATION_PREFIX"-sample-race-rejection.jsonl calibration/"$CALIBRATION_PREFIX"-sample-race-rejection.stderr calibration/"$CALIBRATION_PREFIX"-sample-race-rejection-trace.jsonl; do
     shasum -a 256 "$relative_path"
   done
   for absolute_path in \

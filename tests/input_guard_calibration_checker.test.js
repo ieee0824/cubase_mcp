@@ -13,6 +13,7 @@ const prefix = 'checker-test'
 const guardBinary = process.execPath
 const captureApplication = 'Finder'
 const launchApplicationPath = '/System/Library/CoreServices/Finder.app'
+const guardClockBase = Date.UTC(2026, 7, 31, 12, 0, 0, 0)
 const minimalJpeg = Buffer.from(
     [
         '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkS',
@@ -68,7 +69,7 @@ function readJsonl(file) {
 }
 
 function timestamp(milliseconds) {
-    return new Date(Date.UTC(2026, 7, 31, 12, 0, 0, milliseconds)).toISOString()
+    return new Date(guardClockBase + milliseconds).toISOString()
 }
 
 function counters(overrides = {}) {
@@ -79,18 +80,38 @@ function identity(index) {
     return {
         guard_session_id: sha256Bytes(Buffer.from(`guard-session-${index}`)),
         guard_process_id: 41000 + index,
-        guard_started_at_unix_ms: 1788177600000 + index
+        guard_started_at_unix_ms: guardClockBase + index
     }
 }
 
 function guardRecord(processIdentity, sequence, record) {
     return {
-        version: 4,
+        version: 5,
         coverage: 'action_windows',
         policy: 'consequential_input_only',
         ...processIdentity,
         record_sequence: sequence,
+        recorded_at_unix_ms: guardClockBase + sequence * 40,
         ...record
+    }
+}
+
+function successfulSampleTiming(sequence, phase) {
+    const ordinal = phase === 'arm' ? sequence / 2 : (sequence - 1) / 2
+    const offset = ordinal * 40
+    const phaseOffset = phase === 'arm' ? 2 : 32
+    return {
+        sample_started_at_unix_ms: guardClockBase + offset + phaseOffset,
+        sample_completed_at_unix_ms: guardClockBase + offset + phaseOffset + 1,
+        recorded_at_unix_ms: guardClockBase + offset + phaseOffset + 2
+    }
+}
+
+function rejectionSampleTiming() {
+    return {
+        sample_started_at_unix_ms: guardClockBase + 55,
+        sample_completed_at_unix_ms: guardClockBase + 65,
+        recorded_at_unix_ms: guardClockBase + 66
     }
 }
 
@@ -106,7 +127,8 @@ function armed(processIdentity, sequence, actionId) {
     return guardRecord(processIdentity, sequence, {
         type: 'armed',
         source: 'hid_system_state',
-        action_id: actionId
+        action_id: actionId,
+        ...successfulSampleTiming(sequence, 'arm')
     })
 }
 
@@ -116,7 +138,8 @@ function result(processIdentity, sequence, actionId, deltas, interferenceDetecte
         source: 'hid_system_state',
         action_id: actionId,
         deltas,
-        interference_detected: interferenceDetected
+        interference_detected: interferenceDetected,
+        ...successfulSampleTiming(sequence, 'check')
     })
 }
 
@@ -124,6 +147,16 @@ function guardError(processIdentity, sequence, code) {
     return guardRecord(processIdentity, sequence, {
         type: 'error',
         error: { code, message: code }
+    })
+}
+
+function samplingError(processIdentity, sequence, command, actionId, code) {
+    return guardRecord(processIdentity, sequence, {
+        type: 'error',
+        command,
+        action_id: actionId,
+        error: { code, message: code },
+        ...rejectionSampleTiming()
     })
 }
 
@@ -204,6 +237,14 @@ function actionBase(fixtureDirectory, sessionId, actionId, ordinal, postExpected
         pre_state: makeCapture(fixtureDirectory, actionId, 'pre', times.pre, true),
         post_state: makeCapture(fixtureDirectory, actionId, 'post', times.post, postExpected)
     }
+}
+
+function samplingRejectionActionBase(fixtureDirectory, sessionId, actionId) {
+    const action = actionBase(fixtureDirectory, sessionId, actionId, 1)
+    action.timestamp = timestamp(54)
+    action.call_started_at = timestamp(54)
+    action.call_ended_at = timestamp(66)
+    return action
 }
 
 function sessionHeader(control, sessionId, processIdentity, guardSha, startedAt) {
@@ -456,12 +497,12 @@ function buildWrongTarget(fixtureDirectory, guardSha, processIdentity) {
     writeProcessFiles(fixtureDirectory, 'wrong-target', guard, trace)
 }
 
-function buildSampleRejection(fixtureDirectory, guardSha, processIdentity) {
-    const sessionId = 'sample-rejection-session'
-    const actionId = 'cal.sample-rejection'
-    const guard = [ready(processIdentity), guardError(processIdentity, 2, 'KEY_HELD')]
+function buildHeldStateRejection(fixtureDirectory, guardSha, processIdentity) {
+    const sessionId = 'held-state-rejection-session'
+    const actionId = 'cal.held-state-rejection'
+    const guard = [ready(processIdentity), samplingError(processIdentity, 2, 'arm', actionId, 'KEY_HELD')]
     const action = {
-        ...actionBase(fixtureDirectory, sessionId, actionId, 1),
+        ...samplingRejectionActionBase(fixtureDirectory, sessionId, actionId),
         api: 'physical_input',
         injected_call_count: 0,
         guard_command_phase: 'arm',
@@ -480,11 +521,44 @@ function buildSampleRejection(fixtureDirectory, guardSha, processIdentity) {
         no_retry_within_process: true
     }
     const trace = [
-        sessionHeader('sample_guard_rejection', sessionId, processIdentity, guardSha, timestamp(0)),
+        sessionHeader('held_state_rejection', sessionId, processIdentity, guardSha, timestamp(0)),
         action,
         sessionEnd(sessionId, timestamp(80), 1, { terminal_guard_error: 'KEY_HELD' })
     ]
-    writeProcessFiles(fixtureDirectory, 'sample-rejection', guard, trace)
+    writeProcessFiles(fixtureDirectory, 'held-state-rejection', guard, trace)
+}
+
+function buildSampleRaceRejection(fixtureDirectory, guardSha, processIdentity) {
+    const sessionId = 'sample-race-rejection-session'
+    const actionId = 'cal.sample-race-rejection'
+    const guard = [
+        ready(processIdentity),
+        samplingError(processIdentity, 2, 'arm', actionId, 'INPUT_DURING_SAMPLE')
+    ]
+    const action = {
+        ...samplingRejectionActionBase(fixtureDirectory, sessionId, actionId),
+        api: 'physical_input',
+        injected_call_count: 0,
+        guard_command_phase: 'arm',
+        mode: 'sample_race',
+        physical_input: {
+            kind: 'pointer_move_during_sample',
+            operator_attested: true,
+            continuous_during_arm_sample: true
+        },
+        guard: {
+            ready_observed: true,
+            armed_observed: false,
+            observed_error: 'INPUT_DURING_SAMPLE'
+        },
+        no_retry_within_process: true
+    }
+    const trace = [
+        sessionHeader('sample_race_rejection', sessionId, processIdentity, guardSha, timestamp(0)),
+        action,
+        sessionEnd(sessionId, timestamp(80), 1, { terminal_guard_error: 'INPUT_DURING_SAMPLE' })
+    ]
+    writeProcessFiles(fixtureDirectory, 'sample-race-rejection', guard, trace)
 }
 
 function buildFixture(fixtureDirectory, guardSha) {
@@ -513,7 +587,8 @@ function buildFixture(fixtureDirectory, guardSha) {
         }
     )
     buildWrongTarget(fixtureDirectory, guardSha, identity(7))
-    buildSampleRejection(fixtureDirectory, guardSha, identity(8))
+    buildHeldStateRejection(fixtureDirectory, guardSha, identity(8))
+    buildSampleRaceRejection(fixtureDirectory, guardSha, identity(9))
 }
 
 function runChecker(fixtureDirectory, guardSha) {
@@ -531,6 +606,19 @@ function mutateJsonl(file, mutation) {
     const records = readJsonl(file)
     mutation(records)
     writeJsonl(file, records)
+}
+
+function setCaptureTimestamp(fixtureDirectory, processName, recordIndex, stateKey, capturedAt) {
+    const traceFile = path.join(fixtureDirectory, `${prefix}-${processName}-trace.jsonl`)
+    mutateJsonl(traceFile, (records) => {
+        const capture = records[recordIndex][stateKey]
+        capture.captured_at = capturedAt
+        const stateFile = path.join(fixtureDirectory, capture.state_path)
+        const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'))
+        state.captured_at = capturedAt
+        fs.writeFileSync(stateFile, `${JSON.stringify(state)}\n`)
+        capture.state_sha256 = sha256File(stateFile)
+    })
 }
 
 function expectRejected(validFixture, root, guardSha, name, expectedError, mutation) {
@@ -562,8 +650,119 @@ try {
     assert.equal(valid.status, 0, `valid fixture rejected:\nstdout: ${valid.stdout}\nstderr: ${valid.stderr}`)
     const report = JSON.parse(valid.stdout)
     assert.equal(report.status, 'valid')
-    assert.equal(report.fresh_guard_identity_count, 8)
-    assert.equal(Object.keys(report.guard_sessions).length, 8)
+    assert.equal(report.calibration_report_version, 3)
+    assert.equal(report.guard_contract.version, 5)
+    assert.equal(report.fresh_guard_identity_count, 9)
+    assert.deepEqual(Object.keys(report.guard_sessions), [
+        'automation',
+        'move',
+        'positive-click',
+        'positive-key',
+        'positive-scroll',
+        'positive-drag',
+        'wrong-target',
+        'held-state-rejection',
+        'sample-race-rejection'
+    ])
+    assert.deepEqual(report.controls.held_state_rejection, {
+        mode: 'held_state',
+        error_code: 'KEY_HELD',
+        physical_input_kind: 'keyboard_key_held'
+    })
+    assert.deepEqual(report.controls.sample_race_rejection, {
+        mode: 'sample_race',
+        error_code: 'INPUT_DURING_SAMPLE',
+        physical_input_kind: 'pointer_move_during_sample'
+    })
+    assert.equal(Object.hasOwn(report.controls, 'sample_guard_rejection'), false)
+
+    const mouseHeldFixture = path.join(root, 'valid-mouse-held')
+    cloneFixture(validFixture, mouseHeldFixture)
+    mutateJsonl(path.join(mouseHeldFixture, `${prefix}-held-state-rejection.jsonl`), (records) => {
+        records[1].error = { code: 'MOUSE_BUTTON_HELD', message: 'MOUSE_BUTTON_HELD' }
+    })
+    mutateJsonl(path.join(mouseHeldFixture, `${prefix}-held-state-rejection-trace.jsonl`), (records) => {
+        records[1].physical_input = {
+            kind: 'mouse_button_held',
+            operator_attested: true,
+            began_before_arm_command: true,
+            held_through_sample: true
+        }
+        records[1].guard.observed_error = 'MOUSE_BUTTON_HELD'
+        records[2].terminal_guard_error = 'MOUSE_BUTTON_HELD'
+    })
+    const validMouseHeld = runChecker(mouseHeldFixture, guardSha)
+    assert.equal(
+        validMouseHeld.status,
+        0,
+        `valid mouse-held fixture rejected:\nstdout: ${validMouseHeld.stdout}\nstderr: ${validMouseHeld.stderr}`
+    )
+    assert.deepEqual(JSON.parse(validMouseHeld.stdout).controls.held_state_rejection, {
+        mode: 'held_state',
+        error_code: 'MOUSE_BUTTON_HELD',
+        physical_input_kind: 'mouse_button_held'
+    })
+
+    expectRejected(validFixture, root, guardSha, 'old-or-false-pass', /held-state rejection guard stream invalid/, (fixture) => {
+        const guardFile = path.join(fixture, `${prefix}-held-state-rejection.jsonl`)
+        mutateJsonl(guardFile, (records) => {
+            records[1].error = { code: 'INPUT_DURING_SAMPLE', message: 'INPUT_DURING_SAMPLE' }
+        })
+        const traceFile = path.join(fixture, `${prefix}-held-state-rejection-trace.jsonl`)
+        mutateJsonl(traceFile, (records) => {
+            records[1].mode = 'sample_race'
+            records[1].physical_input = {
+                kind: 'pointer_move_during_sample',
+                operator_attested: true,
+                continuous_during_arm_sample: true
+            }
+            records[1].guard.observed_error = 'INPUT_DURING_SAMPLE'
+            records[2].terminal_guard_error = 'INPUT_DURING_SAMPLE'
+        })
+    })
+
+    expectRejected(validFixture, root, guardSha, 'held-kind-code-mismatch', /held-state rejection trace invalid/, (fixture) => {
+        const traceFile = path.join(fixture, `${prefix}-held-state-rejection-trace.jsonl`)
+        mutateJsonl(traceFile, (records) => {
+            records[1].physical_input.kind = 'mouse_button_held'
+        })
+    })
+
+    expectRejected(validFixture, root, guardSha, 'sample-race-wrong-kind', /sample-race rejection trace invalid/, (fixture) => {
+        const traceFile = path.join(fixture, `${prefix}-sample-race-rejection-trace.jsonl`)
+        mutateJsonl(traceFile, (records) => {
+            records[1].physical_input.kind = 'pointer_move_only'
+        })
+    })
+
+    expectRejected(validFixture, root, guardSha, 'missing-independent-sample-race', /27 canonical files/, (fixture) => {
+        for (const suffix of ['.jsonl', '.stderr', '-trace.jsonl']) {
+            fs.rmSync(path.join(fixture, `${prefix}-sample-race-rejection${suffix}`))
+        }
+    })
+
+    expectRejected(validFixture, root, guardSha, 'action-before-arm-recorded', /not enclosed by its guard arm\/check sampling window/, (fixture) => {
+        setCaptureTimestamp(fixture, 'automation', 1, 'pre_state', timestamp(41))
+    })
+
+    expectRejected(validFixture, root, guardSha, 'post-capture-after-check-started', /not enclosed by its guard arm\/check sampling window/, (fixture) => {
+        setCaptureTimestamp(fixture, 'automation', 1, 'post_state', timestamp(73))
+    })
+
+    expectRejected(validFixture, root, guardSha, 'held-input-starts-after-sample-start', /sample rejection is not time-bound/, (fixture) => {
+        const traceFile = path.join(fixture, `${prefix}-held-state-rejection-trace.jsonl`)
+        mutateJsonl(traceFile, (records) => {
+            records[1].timestamp = timestamp(56)
+            records[1].call_started_at = timestamp(56)
+        })
+    })
+
+    expectRejected(validFixture, root, guardSha, 'sample-race-input-ends-before-sample-completes', /sample rejection is not time-bound/, (fixture) => {
+        const traceFile = path.join(fixture, `${prefix}-sample-race-rejection-trace.jsonl`)
+        mutateJsonl(traceFile, (records) => {
+            records[1].call_ended_at = timestamp(64)
+        })
+    })
 
     expectRejected(validFixture, root, guardSha, 'extra-file', /unexpected calibration artifact/, (fixture) => {
         fs.writeFileSync(path.join(fixture, 'unreviewed-retry.txt'), 'must not be ignored\n')
@@ -657,14 +856,57 @@ try {
         fs.writeFileSync(path.join(fixture, `${prefix}-positive-click.stderr`), 'unexpected diagnostic\n')
     })
 
-    expectRejected(validFixture, root, guardSha, 'record-sequence', /guard v4 identity or record sequence invalid/, (fixture) => {
+    expectRejected(validFixture, root, guardSha, 'record-sequence', /guard v5 identity, timing, or record sequence invalid/, (fixture) => {
         const guard = path.join(fixture, `${prefix}-automation.jsonl`)
         mutateJsonl(guard, (records) => {
             records[1].record_sequence = 1
         })
     })
 
-    expectRejected(validFixture, root, guardSha, 'duplicate-identity', /eight distinct fresh process identities/, (fixture) => {
+    expectRejected(validFixture, root, guardSha, 'legacy-guard-v4', /guard v5 identity, timing, or record sequence invalid/, (fixture) => {
+        const guard = path.join(fixture, `${prefix}-automation.jsonl`)
+        mutateJsonl(guard, (records) => {
+            records.forEach((record) => { record.version = 4 })
+        })
+    })
+
+    expectRejected(validFixture, root, guardSha, 'missing-recorded-at', /guard v5 identity, timing, or record sequence invalid/, (fixture) => {
+        const guard = path.join(fixture, `${prefix}-automation.jsonl`)
+        mutateJsonl(guard, (records) => {
+            delete records[0].recorded_at_unix_ms
+        })
+    })
+
+    expectRejected(validFixture, root, guardSha, 'missing-check-sample-completion', /guard v5 identity, timing, or record sequence invalid/, (fixture) => {
+        const guard = path.join(fixture, `${prefix}-automation.jsonl`)
+        mutateJsonl(guard, (records) => {
+            delete records[2].sample_completed_at_unix_ms
+        })
+    })
+
+    expectRejected(validFixture, root, guardSha, 'sample-completes-after-record', /guard v5 identity, timing, or record sequence invalid/, (fixture) => {
+        const guard = path.join(fixture, `${prefix}-automation.jsonl`)
+        mutateJsonl(guard, (records) => {
+            records[1].sample_completed_at_unix_ms = records[1].recorded_at_unix_ms + 1
+        })
+    })
+
+    expectRejected(validFixture, root, guardSha, 'sample-error-command-mismatch', /sample-race rejection guard stream invalid/, (fixture) => {
+        const guard = path.join(fixture, `${prefix}-sample-race-rejection.jsonl`)
+        mutateJsonl(guard, (records) => {
+            records[1].command = 'check'
+        })
+    })
+
+    expectRejected(validFixture, root, guardSha, 'sample-error-missing-timing-pair', /guard v5 identity, timing, or record sequence invalid/, (fixture) => {
+        const guard = path.join(fixture, `${prefix}-sample-race-rejection.jsonl`)
+        mutateJsonl(guard, (records) => {
+            delete records[1].sample_started_at_unix_ms
+            delete records[1].sample_completed_at_unix_ms
+        })
+    })
+
+    expectRejected(validFixture, root, guardSha, 'duplicate-identity', /nine distinct fresh process identities/, (fixture) => {
         const automation = readJsonl(path.join(fixture, `${prefix}-automation.jsonl`))[0]
         const duplicateFields = {
             guard_session_id: automation.guard_session_id,

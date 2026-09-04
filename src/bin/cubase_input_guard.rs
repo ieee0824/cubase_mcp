@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-const GUARD_PROTOCOL_VERSION: u32 = 4;
+const GUARD_PROTOCOL_VERSION: u32 = 5;
 const GUARD_COVERAGE: &str = "action_windows";
 const GUARD_PRIVACY: &str = "counts_and_held_state_boolean";
 const GUARD_POLICY: &str = "consequential_input_only";
@@ -82,8 +82,44 @@ impl InputCounters {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn input_changed_during_sample(aggregate_before: u32, aggregate_after: u32) -> bool {
     aggregate_before != aggregate_after
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SampleTiming {
+    started_at_unix_ms: u64,
+    completed_at_unix_ms: u64,
+}
+
+impl SampleTiming {
+    fn decorate_record(self, mut value: Value) -> Value {
+        let object = value
+            .as_object_mut()
+            .expect("guard records are always JSON objects");
+        object.insert(
+            "sample_started_at_unix_ms".into(),
+            Value::from(self.started_at_unix_ms),
+        );
+        object.insert(
+            "sample_completed_at_unix_ms".into(),
+            Value::from(self.completed_at_unix_ms),
+        );
+        value
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct TimedInputCounters {
+    counters: InputCounters,
+    timing: SampleTiming,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SampleCommandContext {
+    command: &'static str,
+    action_id: String,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -99,6 +135,20 @@ enum Command {
 impl Command {
     fn requires_counter_sample(&self) -> bool {
         matches!(self, Self::Arm { .. } | Self::Check { .. })
+    }
+
+    fn sample_context(&self) -> Option<SampleCommandContext> {
+        match self {
+            Self::Arm { action_id } => Some(SampleCommandContext {
+                command: "arm",
+                action_id: action_id.clone(),
+            }),
+            Self::Check { action_id } => Some(SampleCommandContext {
+                command: "check",
+                action_id: action_id.clone(),
+            }),
+            Self::Cancel { .. } | Self::Reject { .. } | Self::Ping | Self::Finish => None,
+        }
     }
 }
 
@@ -317,6 +367,8 @@ impl GuardState {
 struct GuardError {
     code: &'static str,
     message: String,
+    sample_timing: Option<SampleTiming>,
+    sample_command: Option<SampleCommandContext>,
 }
 
 impl GuardError {
@@ -324,11 +376,23 @@ impl GuardError {
         Self {
             code,
             message: message.into(),
+            sample_timing: None,
+            sample_command: None,
         }
     }
 
+    fn with_sample_timing(mut self, timing: SampleTiming) -> Self {
+        self.sample_timing = Some(timing);
+        self
+    }
+
+    fn with_sample_command(mut self, command: SampleCommandContext) -> Self {
+        self.sample_command = Some(command);
+        self
+    }
+
     fn as_json(&self) -> Value {
-        json!({
+        let mut value = json!({
             "version": GUARD_PROTOCOL_VERSION,
             "type": "error",
             "coverage": GUARD_COVERAGE,
@@ -337,7 +401,18 @@ impl GuardError {
                 "code": self.code,
                 "message": self.message
             }
-        })
+        });
+        if let Some(timing) = self.sample_timing {
+            value = timing.decorate_record(value);
+        }
+        if let Some(command) = &self.sample_command {
+            let object = value
+                .as_object_mut()
+                .expect("guard errors are always JSON objects");
+            object.insert("command".into(), Value::String(command.command.into()));
+            object.insert("action_id".into(), Value::String(command.action_id.clone()));
+        }
+        value
     }
 }
 
@@ -415,6 +490,14 @@ fn read_bounded_line(reader: &mut impl BufRead, maximum: usize) -> io::Result<Op
     }
 }
 
+fn current_unix_time_ms() -> Result<u64, GuardError> {
+    let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_| {
+        GuardError::new("CLOCK_ERROR", "system time is earlier than the Unix epoch")
+    })?;
+    u64::try_from(elapsed.as_millis())
+        .map_err(|_| GuardError::new("CLOCK_ERROR", "system time does not fit in milliseconds"))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct GuardSessionIdentity {
     session_id: String,
@@ -450,6 +533,7 @@ fn decorate_session_record(
     mut value: Value,
     identity: &GuardSessionIdentity,
     record_sequence: u64,
+    recorded_at_unix_ms: u64,
 ) -> Value {
     let object = value
         .as_object_mut()
@@ -464,6 +548,10 @@ fn decorate_session_record(
         Value::from(identity.started_at_unix_ms),
     );
     object.insert("record_sequence".into(), Value::from(record_sequence));
+    object.insert(
+        "recorded_at_unix_ms".into(),
+        Value::from(recorded_at_unix_ms),
+    );
     value
 }
 
@@ -488,12 +576,85 @@ impl GuardOutput {
         }
     }
 
-    fn emit(&mut self, value: Value) -> io::Result<()> {
-        let record = decorate_session_record(value, &self.identity, self.next_record_sequence);
-        emit_raw(&record)?;
+    fn emit(&mut self, value: Value) -> Result<(), GuardError> {
+        let recorded_at_unix_ms = current_unix_time_ms()?;
+        let record = decorate_session_record(
+            value,
+            &self.identity,
+            self.next_record_sequence,
+            recorded_at_unix_ms,
+        );
+        emit_raw(&record).map_err(|error| GuardError::new("OUTPUT_ERROR", error.to_string()))?;
         self.next_record_sequence += 1;
         Ok(())
     }
+}
+
+fn time_input_counter_sample_with<C, S>(
+    mut clock: C,
+    sample: S,
+) -> Result<TimedInputCounters, GuardError>
+where
+    C: FnMut() -> Result<u64, GuardError>,
+    S: FnOnce() -> Result<InputCounters, GuardError>,
+{
+    let started_at_unix_ms = clock()?;
+    let sample_result = sample();
+    let completed_at_unix_ms = clock()?;
+    if completed_at_unix_ms < started_at_unix_ms {
+        return Err(GuardError::new(
+            "CLOCK_ERROR",
+            "system time moved backwards while the HID counter snapshot was being read",
+        ));
+    }
+    let timing = SampleTiming {
+        started_at_unix_ms,
+        completed_at_unix_ms,
+    };
+    sample_result
+        .map(|counters| TimedInputCounters { counters, timing })
+        .map_err(|error| error.with_sample_timing(timing))
+}
+
+fn sample_input_counters_timed() -> Result<TimedInputCounters, GuardError> {
+    time_input_counter_sample_with(current_unix_time_ms, sample_input_counters)
+}
+
+fn handle_command_with_sampler<S>(
+    state: &mut GuardState,
+    command: Command,
+    sample: S,
+) -> Result<Value, GuardError>
+where
+    S: FnOnce() -> Result<TimedInputCounters, GuardError>,
+{
+    let sample_context = command.sample_context();
+    debug_assert_eq!(command.requires_counter_sample(), sample_context.is_some());
+    let timed_sample = match &sample_context {
+        Some(context) => {
+            Some(sample().map_err(|error| error.with_sample_command(context.clone()))?)
+        }
+        None => None,
+    };
+    let counters = timed_sample
+        .as_ref()
+        .map_or_else(InputCounters::default, |sample| sample.counters);
+    let response = match state.handle(command, counters) {
+        Ok(response) => response,
+        Err(error) => {
+            let error = match (&timed_sample, sample_context) {
+                (Some(sample), Some(context)) => error
+                    .with_sample_timing(sample.timing)
+                    .with_sample_command(context),
+                _ => error,
+            };
+            return Err(error);
+        }
+    };
+    Ok(match timed_sample {
+        Some(sample) => sample.timing.decorate_record(response),
+        None => response,
+    })
 }
 
 fn main() -> ExitCode {
@@ -522,17 +683,15 @@ fn run(output: &mut GuardOutput) -> Result<(), GuardError> {
         ));
     }
 
-    sample_input_counters()?;
-    output
-        .emit(json!({
-            "version": GUARD_PROTOCOL_VERSION,
-            "type": "ready",
-            "source": "hid_system_state",
-            "privacy": GUARD_PRIVACY,
-            "coverage": GUARD_COVERAGE,
-            "policy": GUARD_POLICY
-        }))
-        .map_err(|error| GuardError::new("OUTPUT_ERROR", error.to_string()))?;
+    sample_input_counters_timed()?;
+    output.emit(json!({
+        "version": GUARD_PROTOCOL_VERSION,
+        "type": "ready",
+        "source": "hid_system_state",
+        "privacy": GUARD_PRIVACY,
+        "coverage": GUARD_COVERAGE,
+        "policy": GUARD_POLICY
+    }))?;
 
     let stdin = io::stdin();
     let mut reader = stdin.lock();
@@ -545,15 +704,9 @@ fn run(output: &mut GuardOutput) -> Result<(), GuardError> {
         }
         let command = parse_command(&line)?;
         let finishing = command == Command::Finish;
-        let counters = if command.requires_counter_sample() {
-            sample_input_counters()?
-        } else {
-            InputCounters::default()
-        };
-        let response = state.handle(command, counters)?;
-        output
-            .emit(response)
-            .map_err(|error| GuardError::new("OUTPUT_ERROR", error.to_string()))?;
+        let response =
+            handle_command_with_sampler(&mut state, command, sample_input_counters_timed)?;
+        output.emit(response)?;
         if finishing {
             return Ok(());
         }
@@ -708,6 +861,7 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::{Cell, RefCell};
     use std::io::Cursor;
 
     fn counters(mouse_moved: u32, key_down: u32) -> InputCounters {
@@ -715,6 +869,28 @@ mod tests {
             mouse_moved,
             key_down,
             ..InputCounters::default()
+        }
+    }
+
+    fn timed_counters(
+        counters: InputCounters,
+        started_at_unix_ms: u64,
+        completed_at_unix_ms: u64,
+    ) -> TimedInputCounters {
+        TimedInputCounters {
+            counters,
+            timing: SampleTiming {
+                started_at_unix_ms,
+                completed_at_unix_ms,
+            },
+        }
+    }
+
+    fn test_identity() -> GuardSessionIdentity {
+        GuardSessionIdentity {
+            session_id: "a".repeat(64),
+            process_id: 42,
+            started_at_unix_ms: 1_788_000_000_000,
         }
     }
 
@@ -742,6 +918,232 @@ mod tests {
         assert!(!input_changed_during_sample(100, 100));
         assert!(input_changed_during_sample(100, 101));
         assert!(input_changed_during_sample(u32::MAX, 0));
+    }
+
+    #[test]
+    fn sample_timestamps_strictly_bracket_the_sample_call_without_sleeping() {
+        let events = RefCell::new(Vec::new());
+        let clock_call = Cell::new(0);
+        let sample = time_input_counter_sample_with(
+            || {
+                events.borrow_mut().push("clock");
+                let value = [1_000, 1_025][clock_call.get()];
+                clock_call.set(clock_call.get() + 1);
+                Ok(value)
+            },
+            || {
+                events.borrow_mut().push("sample");
+                Ok(counters(10, 20))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(*events.borrow(), ["clock", "sample", "clock"]);
+        assert_eq!(sample.counters, counters(10, 20));
+        assert_eq!(sample.timing.started_at_unix_ms, 1_000);
+        assert_eq!(sample.timing.completed_at_unix_ms, 1_025);
+    }
+
+    #[test]
+    fn sample_timing_fails_closed_if_the_wall_clock_moves_backwards() {
+        let mut timestamps = [1_025, 1_000].into_iter();
+        let error = time_input_counter_sample_with(
+            || Ok(timestamps.next().unwrap()),
+            || Ok(counters(10, 20)),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "CLOCK_ERROR");
+        assert!(error.sample_timing.is_none());
+    }
+
+    #[test]
+    fn arm_and_check_records_expose_v5_sample_boundaries() {
+        let identity = test_identity();
+        let session_started_at_unix_ms = identity.started_at_unix_ms;
+        let baseline = counters(10, 20);
+        let mut state = GuardState::new();
+        let ready = decorate_session_record(
+            json!({"version": GUARD_PROTOCOL_VERSION, "type": "ready"}),
+            &identity,
+            1,
+            session_started_at_unix_ms + 10,
+        );
+        let armed = handle_command_with_sampler(
+            &mut state,
+            Command::Arm {
+                action_id: "timed-action".into(),
+            },
+            || {
+                Ok(timed_counters(
+                    baseline,
+                    session_started_at_unix_ms + 20,
+                    session_started_at_unix_ms + 30,
+                ))
+            },
+        )
+        .unwrap();
+        let armed = decorate_session_record(armed, &identity, 2, session_started_at_unix_ms + 35);
+
+        let ui_pre_recorded_at_unix_ms = session_started_at_unix_ms + 40;
+        let ui_post_recorded_at_unix_ms = session_started_at_unix_ms + 90;
+        let checked = handle_command_with_sampler(
+            &mut state,
+            Command::Check {
+                action_id: "timed-action".into(),
+            },
+            || {
+                Ok(timed_counters(
+                    baseline,
+                    session_started_at_unix_ms + 100,
+                    session_started_at_unix_ms + 110,
+                ))
+            },
+        )
+        .unwrap();
+        let checked =
+            decorate_session_record(checked, &identity, 3, session_started_at_unix_ms + 115);
+
+        assert_eq!(GUARD_PROTOCOL_VERSION, 5);
+        assert_eq!(armed["version"], 5);
+        assert_eq!(armed["type"], "armed");
+        assert_eq!(
+            armed["sample_started_at_unix_ms"],
+            session_started_at_unix_ms + 20
+        );
+        assert_eq!(
+            armed["sample_completed_at_unix_ms"],
+            session_started_at_unix_ms + 30
+        );
+        assert_eq!(
+            armed["recorded_at_unix_ms"],
+            session_started_at_unix_ms + 35
+        );
+        assert!(ready.get("sample_started_at_unix_ms").is_none());
+        assert!(ready.get("sample_completed_at_unix_ms").is_none());
+        assert!(
+            ready["recorded_at_unix_ms"].as_u64().unwrap()
+                <= armed["sample_started_at_unix_ms"].as_u64().unwrap()
+        );
+        assert!(
+            armed["sample_started_at_unix_ms"].as_u64().unwrap()
+                <= armed["sample_completed_at_unix_ms"].as_u64().unwrap()
+        );
+        assert!(
+            armed["sample_completed_at_unix_ms"].as_u64().unwrap() <= ui_pre_recorded_at_unix_ms
+        );
+        assert!(
+            armed["sample_completed_at_unix_ms"].as_u64().unwrap()
+                <= armed["recorded_at_unix_ms"].as_u64().unwrap()
+        );
+
+        assert_eq!(checked["version"], 5);
+        assert_eq!(checked["type"], "result");
+        assert_eq!(
+            checked["sample_started_at_unix_ms"],
+            session_started_at_unix_ms + 100
+        );
+        assert_eq!(
+            checked["sample_completed_at_unix_ms"],
+            session_started_at_unix_ms + 110
+        );
+        assert_eq!(
+            checked["recorded_at_unix_ms"],
+            session_started_at_unix_ms + 115
+        );
+        assert!(
+            ui_post_recorded_at_unix_ms <= checked["sample_started_at_unix_ms"].as_u64().unwrap()
+        );
+        assert!(
+            checked["sample_started_at_unix_ms"].as_u64().unwrap()
+                <= checked["sample_completed_at_unix_ms"].as_u64().unwrap()
+        );
+        assert!(
+            armed["recorded_at_unix_ms"].as_u64().unwrap()
+                <= checked["sample_started_at_unix_ms"].as_u64().unwrap()
+        );
+        assert!(
+            checked["sample_completed_at_unix_ms"].as_u64().unwrap()
+                <= checked["recorded_at_unix_ms"].as_u64().unwrap()
+        );
+    }
+
+    #[test]
+    fn arm_and_check_sampling_errors_retain_timing_and_command_context() {
+        let identity = test_identity();
+        let cases = [
+            ("KEY_HELD", "arm", 300),
+            ("MOUSE_BUTTON_HELD", "check", 400),
+            ("INPUT_DURING_SAMPLE", "arm", 500),
+        ];
+
+        for (index, (code, command_name, sample_offset_ms)) in cases.into_iter().enumerate() {
+            let mut state = GuardState::new();
+            let started_at_unix_ms = identity.started_at_unix_ms + sample_offset_ms;
+            let command = match command_name {
+                "arm" => Command::Arm {
+                    action_id: "sample-error".into(),
+                },
+                "check" => Command::Check {
+                    action_id: "sample-error".into(),
+                },
+                _ => unreachable!(),
+            };
+            let mut timestamps = [started_at_unix_ms, started_at_unix_ms + 5].into_iter();
+            let error = handle_command_with_sampler(&mut state, command, || {
+                time_input_counter_sample_with(
+                    || Ok(timestamps.next().unwrap()),
+                    || Err(GuardError::new(code, "sample rejected")),
+                )
+            })
+            .unwrap_err();
+            let record = decorate_session_record(
+                error.as_json(),
+                &identity,
+                u64::try_from(index + 1).unwrap(),
+                started_at_unix_ms + 10,
+            );
+
+            assert_eq!(record["version"], 5);
+            assert_eq!(record["type"], "error");
+            assert_eq!(record["error"]["code"], code);
+            assert_eq!(record["command"], command_name);
+            assert_eq!(record["action_id"], "sample-error");
+            assert_eq!(record["sample_started_at_unix_ms"], started_at_unix_ms);
+            assert_eq!(
+                record["sample_completed_at_unix_ms"],
+                started_at_unix_ms + 5
+            );
+            assert_eq!(record["recorded_at_unix_ms"], started_at_unix_ms + 10);
+        }
+    }
+
+    #[test]
+    fn post_sample_state_errors_also_retain_the_sample_boundary() {
+        let mut state = GuardState::new();
+        handle_command_with_sampler(
+            &mut state,
+            Command::Arm {
+                action_id: "expected".into(),
+            },
+            || Ok(timed_counters(counters(10, 20), 600, 605)),
+        )
+        .unwrap();
+
+        let error = handle_command_with_sampler(
+            &mut state,
+            Command::Check {
+                action_id: "wrong".into(),
+            },
+            || Ok(timed_counters(counters(10, 20), 700, 705)),
+        )
+        .unwrap_err()
+        .as_json();
+        assert_eq!(error["error"]["code"], "ACTION_ID_MISMATCH");
+        assert_eq!(error["command"], "check");
+        assert_eq!(error["action_id"], "wrong");
+        assert_eq!(error["sample_started_at_unix_ms"], 700);
+        assert_eq!(error["sample_completed_at_unix_ms"], 705);
     }
 
     #[test]
@@ -1073,21 +1475,23 @@ mod tests {
     }
 
     #[test]
-    fn session_identity_is_added_to_every_emitted_record() {
-        let identity = GuardSessionIdentity {
-            session_id: "a".repeat(64),
-            process_id: 42,
-            started_at_unix_ms: 1_788_000_000_123,
-        };
+    fn trusted_session_and_record_time_are_added_to_every_emitted_record() {
+        let identity = test_identity();
         let record = decorate_session_record(
-            json!({"version": GUARD_PROTOCOL_VERSION, "type": "ready"}),
+            json!({
+                "version": GUARD_PROTOCOL_VERSION,
+                "type": "ready",
+                "recorded_at_unix_ms": 1
+            }),
             &identity,
             7,
+            1_788_000_000_123,
         );
         assert_eq!(record["guard_session_id"], "a".repeat(64));
         assert_eq!(record["guard_process_id"], 42);
-        assert_eq!(record["guard_started_at_unix_ms"], 1_788_000_000_123_u64);
+        assert_eq!(record["guard_started_at_unix_ms"], 1_788_000_000_000_u64);
         assert_eq!(record["record_sequence"], 7);
+        assert_eq!(record["recorded_at_unix_ms"], 1_788_000_000_123_u64);
     }
 
     #[test]
@@ -1195,5 +1599,17 @@ mod tests {
         assert_eq!(error["version"], GUARD_PROTOCOL_VERSION);
         assert_eq!(error["coverage"], GUARD_COVERAGE);
         assert_eq!(error["policy"], GUARD_POLICY);
+        assert!(
+            !error
+                .as_object()
+                .unwrap()
+                .contains_key("sample_started_at_unix_ms")
+        );
+        assert!(
+            !error
+                .as_object()
+                .unwrap()
+                .contains_key("sample_completed_at_unix_ms")
+        );
     }
 }

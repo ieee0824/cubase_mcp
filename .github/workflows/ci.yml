@@ -63,17 +63,7 @@ jobs:
 
       - name: Run Clippy
         if: runner.os == 'Linux'
-        run: |
-          # The production input guard is macOS-only. Its aggregate-sample
-          # helper remains available on other platforms solely for unit tests,
-          # so only that regular non-test binary has an intentional dead item.
-          cargo clippy --all-targets --locked -- -D warnings -A dead-code
-          cargo clippy --locked --lib --tests --benches --examples \
-            --bin cubase_mcp \
-            --bin cubase_bridge_mock \
-            --bin cubase_track_probe_audit \
-            --bin cubase_track_probe_collector \
-            -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Run Rust tests
         run: cargo test --all-targets --locked

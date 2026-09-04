@@ -82,6 +82,7 @@ impl InputCounters {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn input_changed_during_sample(aggregate_before: u32, aggregate_after: u32) -> bool {
     aggregate_before != aggregate_after
 }

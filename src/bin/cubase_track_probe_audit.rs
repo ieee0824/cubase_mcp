@@ -12,7 +12,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 const AUDIT_MANIFEST_VERSION: u32 = 1;
-const AUDIT_REPORT_VERSION: u32 = 1;
+const AUDIT_REPORT_VERSION: u32 = 2;
 const RECORD_FORMAT_VERSION: u64 = 1;
 const FIXTURE_REVISION: u32 = 2;
 const CALLBACK_WINDOW_MS: u64 = 5_000;
@@ -28,6 +28,8 @@ const MAX_SAFE_TEXT_BYTES: usize = 96;
 const MAX_SEMANTIC_ITEMS: usize = 100_000;
 const MAX_HOST_ID_BYTES: usize = 4_096;
 const MAX_HOST_ID_FRAGMENTS: usize = 16;
+const MAX_DIRECT_ACCESS_OBJECT_ID: u64 = 9_007_199_254_740_991;
+const DIRECT_ACCESS_PROJECTION: &str = "mix_console_root_children_v1";
 const P05_TITLE_NFC: &str = "CMCP_05_日本語_é_🎹";
 const P05_TITLE_NFD: &str = "CMCP_05_日本語_e\u{301}_🎹";
 const P09_TITLE_PREFIX: &str = "CMCP_09_LONG_";
@@ -200,6 +202,23 @@ impl Profile {
         match self {
             Self::C13MixerBank => ("Cubase Pro", "13.0.30.226", "1.1"),
             Self::C15Combined => ("Cubase Pro", "15.0.30.287", "1.3"),
+        }
+    }
+
+    const fn expected_probe_host_version(self) -> &'static str {
+        match self {
+            Self::C13MixerBank => "13.0.30",
+            Self::C15Combined => "15.0.30",
+        }
+    }
+
+    fn accepts_probe_host_version(self, actual: &Value) -> bool {
+        match actual {
+            Value::String(actual) => {
+                actual == self.expected_probe_host_version() || actual == self.expected_host().1
+            }
+            Value::Null => matches!(self, Self::C13MixerBank),
+            _ => false,
         }
     }
 
@@ -483,6 +502,9 @@ struct MixerBankCapabilityReport {
 struct DirectAccessCapabilityReport {
     supported: bool,
     active: bool,
+    projection: &'static str,
+    scope_depth: u64,
+    authoritative_for_track_enumeration: bool,
     unique_name: bool,
     unique_name_policy: &'static str,
     unique_id: bool,
@@ -530,7 +552,17 @@ enum SemanticProjection {
     },
     DirectAccess {
         checkpoint_id: &'static str,
+        scope: &'static str,
+        scope_depth: u64,
+        scope_complete: bool,
+        host_graph_complete: bool,
+        root_child_count: u64,
+        authoritative_for_track_enumeration: bool,
         total_wire_items: usize,
+        observation_count: usize,
+        reference_count: usize,
+        cycle_reference_count: usize,
+        shared_reference_count: usize,
         missing_count: usize,
         duplicate_count: usize,
         unknown_count: usize,
@@ -543,6 +575,7 @@ enum SemanticProjection {
         p05_title: FixtureTitleComparison,
         p09_title: FixtureTitleComparison,
         nodes: Vec<DirectAccessProjection>,
+        references: Vec<DirectAccessReferenceProjection>,
     },
 }
 
@@ -629,8 +662,27 @@ struct DirectAccessProjection {
     mixer_index: Option<f64>,
     mixer_zone: Option<f64>,
     child_count: Option<u64>,
+    children_expanded: bool,
     metadata_error_count: Option<u64>,
     redacted_string_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum DirectAccessReferenceKind {
+    AncestorCycle,
+    SharedReference,
+}
+
+#[derive(Debug, Serialize)]
+struct DirectAccessReferenceProjection {
+    reference_index: usize,
+    depth: u64,
+    child_index: u64,
+    target_observation_index: u64,
+    parent_alias: String,
+    target_alias: String,
+    reference_kind: DirectAccessReferenceKind,
 }
 
 #[derive(Default)]
@@ -818,6 +870,7 @@ fn validate_manifest(manifest: &AuditManifest) -> AuditResult<()> {
 
     let required: HashSet<_> = REQUIRED_CHECKPOINTS.into_iter().collect();
     let mut observed = HashSet::new();
+    let mut observed_order = Vec::with_capacity(manifest.annotations.len());
     for annotation in &manifest.annotations {
         let Some(required_id) = canonical_checkpoint_id(&annotation.checkpoint_id) else {
             return Err(AuditError::new("ANNOTATION_CHECKPOINT_UNEXPECTED"));
@@ -825,6 +878,7 @@ fn validate_manifest(manifest: &AuditManifest) -> AuditResult<()> {
         if !observed.insert(required_id) {
             return Err(AuditError::new("ANNOTATION_CHECKPOINT_DUPLICATE"));
         }
+        observed_order.push(required_id);
         if annotation.result != AnnotationResult::Observed
             || !annotation.ui_ground_truth_confirmed
             || !annotation.action_confirmed
@@ -834,6 +888,9 @@ fn validate_manifest(manifest: &AuditManifest) -> AuditResult<()> {
     }
     if observed != required {
         return Err(AuditError::new("ANNOTATION_CHECKPOINT_MISSING"));
+    }
+    if observed_order.as_slice() != REQUIRED_CHECKPOINTS {
+        return Err(AuditError::new("ANNOTATION_CHECKPOINT_ORDER_INVALID"));
     }
 
     Ok(())
@@ -1392,6 +1449,16 @@ struct RawSnapshotAssembly {
     first_observation_seq: Option<u64>,
     last_observation_seq: Option<u64>,
     remaining_feedback_items: Option<u64>,
+    direct_access_base_object_id: Option<u64>,
+    direct_access_projection: Option<String>,
+    direct_access_scope_depth: Option<u64>,
+    direct_access_scope_complete: Option<bool>,
+    direct_access_host_graph_complete: Option<bool>,
+    direct_access_root_child_count: Option<u64>,
+    direct_access_authoritative_for_track_enumeration: Option<bool>,
+    direct_access_reference_items: Option<usize>,
+    direct_access_cycle_count: Option<u64>,
+    direct_access_shared_reference_count: Option<u64>,
     direct_access_error_count: Option<u64>,
     chunk_count: usize,
     next_chunk: usize,
@@ -2199,6 +2266,28 @@ fn collect_snapshot_chunk(
     let first_observation_seq = data.get("first_observation_seq").and_then(Value::as_u64);
     let last_observation_seq = data.get("last_observation_seq").and_then(Value::as_u64);
     let remaining_feedback_items = data.get("remaining_items").and_then(Value::as_u64);
+    let direct_access_base_object_id = data.get("base_object_id").and_then(Value::as_u64);
+    let direct_access_projection = data
+        .get("projection")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let direct_access_scope_depth = data.get("scope_depth").and_then(Value::as_u64);
+    let direct_access_scope_complete = data.get("scope_complete").and_then(Value::as_bool);
+    let direct_access_host_graph_complete =
+        data.get("host_graph_complete").and_then(Value::as_bool);
+    let direct_access_root_child_count = data.get("root_child_count").and_then(Value::as_u64);
+    let direct_access_authoritative_for_track_enumeration = data
+        .get("authoritative_for_track_enumeration")
+        .and_then(Value::as_bool);
+    let direct_access_reference_items = data
+        .get("reference_items")
+        .and_then(Value::as_u64)
+        .map(usize::try_from)
+        .transpose()
+        .map_err(|_| AuditError::new("DIRECT_ACCESS_CHUNK_METADATA_INVALID"))?;
+    let direct_access_cycle_count = data.get("cycle_count").and_then(Value::as_u64);
+    let direct_access_shared_reference_count =
+        data.get("shared_reference_count").and_then(Value::as_u64);
     let direct_access_error_count = data.get("error_count").and_then(Value::as_u64);
     if (is_snapshot && kind == SnapshotKind::Bank && config_id.is_none())
         || (is_snapshot && kind == SnapshotKind::DirectAccess && config_id.is_some())
@@ -2270,6 +2359,8 @@ fn collect_snapshot_chunk(
                 || chunk_count > total_items
                 || chunk_count < total_items.div_ceil(2)))
         || observation_items > total_items
+        || direct_access_reference_items
+            .is_some_and(|references| observation_items.saturating_add(references) > total_items)
         || observation_items > observation_limit
         || snapshot_complete != (chunk_index + 1 == chunk_count)
     {
@@ -2293,6 +2384,16 @@ fn collect_snapshot_chunk(
             first_observation_seq,
             last_observation_seq,
             remaining_feedback_items,
+            direct_access_base_object_id,
+            direct_access_projection: direct_access_projection.clone(),
+            direct_access_scope_depth,
+            direct_access_scope_complete,
+            direct_access_host_graph_complete,
+            direct_access_root_child_count,
+            direct_access_authoritative_for_track_enumeration,
+            direct_access_reference_items,
+            direct_access_cycle_count,
+            direct_access_shared_reference_count,
             direct_access_error_count,
             chunk_count,
             next_chunk: 0,
@@ -2316,6 +2417,17 @@ fn collect_snapshot_chunk(
         || assembly.first_observation_seq != first_observation_seq
         || assembly.last_observation_seq != last_observation_seq
         || assembly.remaining_feedback_items != remaining_feedback_items
+        || assembly.direct_access_base_object_id != direct_access_base_object_id
+        || assembly.direct_access_projection != direct_access_projection
+        || assembly.direct_access_scope_depth != direct_access_scope_depth
+        || assembly.direct_access_scope_complete != direct_access_scope_complete
+        || assembly.direct_access_host_graph_complete != direct_access_host_graph_complete
+        || assembly.direct_access_root_child_count != direct_access_root_child_count
+        || assembly.direct_access_authoritative_for_track_enumeration
+            != direct_access_authoritative_for_track_enumeration
+        || assembly.direct_access_reference_items != direct_access_reference_items
+        || assembly.direct_access_cycle_count != direct_access_cycle_count
+        || assembly.direct_access_shared_reference_count != direct_access_shared_reference_count
         || assembly.direct_access_error_count != direct_access_error_count
         || assembly.chunk_count != chunk_count
         || assembly.total_items != total_items
@@ -2340,6 +2452,9 @@ fn collect_snapshot_chunk(
         assembly.completed = true;
         validate_snapshot_privacy(assembly)?;
         validate_chunk_aggregate_metadata(assembly)?;
+        if assembly.kind == SnapshotKind::DirectAccess && assembly.is_snapshot {
+            validate_direct_access_root_frontier(assembly)?;
+        }
         evidence.completed_chunk_streams += 1;
         if is_snapshot {
             evidence.snapshots.push(SnapshotEvidence {
@@ -2384,9 +2499,17 @@ fn validate_chunk_data_schema(
     ];
     const DIRECT_SNAPSHOT_EXTRA: &[&str] = &[
         "base_object_id",
+        "projection",
+        "scope_depth",
+        "scope_complete",
+        "host_graph_complete",
+        "root_child_count",
+        "authoritative_for_track_enumeration",
         "observation_epoch",
         "observation_epoch_status",
+        "reference_items",
         "cycle_count",
+        "shared_reference_count",
         "error_count",
         "truncation_reasons",
     ];
@@ -2417,8 +2540,29 @@ fn validate_chunk_data_schema(
             .get("truncation_reasons")
             .and_then(Value::as_array)
             .ok_or_else(|| AuditError::new("DIRECT_ACCESS_CHUNK_METADATA_INVALID"))?;
-        if data.get("base_object_id").and_then(Value::as_u64).is_none()
-            || required_u64(data, "cycle_count")? != 0
+        let reference_items = required_u64(data, "reference_items")?;
+        let cycle_count = required_u64(data, "cycle_count")?;
+        let shared_reference_count = required_u64(data, "shared_reference_count")?;
+        let truncated = required_bool(data, "truncated")?;
+        let scope_complete = required_bool(data, "scope_complete")?;
+        if !is_nullable_u64(data.get("base_object_id"))
+            || (!truncated && data.get("base_object_id").and_then(Value::as_u64).is_none())
+            || data.get("projection").and_then(Value::as_str) != Some(DIRECT_ACCESS_PROJECTION)
+            || data.get("scope_depth").and_then(Value::as_u64) != Some(1)
+            || scope_complete == truncated
+            || data.get("host_graph_complete").and_then(Value::as_bool) != Some(false)
+            || !is_nullable_u64(data.get("root_child_count"))
+            || (!truncated
+                && data
+                    .get("root_child_count")
+                    .and_then(Value::as_u64)
+                    .is_none())
+            || data
+                .get("authoritative_for_track_enumeration")
+                .and_then(Value::as_bool)
+                != Some(false)
+            || reference_items > MAX_SEMANTIC_ITEMS as u64
+            || cycle_count.checked_add(shared_reference_count) != Some(reference_items)
             || reasons.iter().any(|reason| reason.as_str().is_none())
             || (!required_bool(data, "truncated")? && !reasons.is_empty())
         {
@@ -2440,7 +2584,7 @@ fn validate_chunk_data_schema(
 }
 
 fn validate_chunk_aggregate_metadata(assembly: &RawSnapshotAssembly) -> AuditResult<()> {
-    let observations: Vec<_> = assembly
+    let semantic_items: Vec<_> = assembly
         .items
         .iter()
         .filter_map(|item| item.as_object())
@@ -2448,15 +2592,45 @@ fn validate_chunk_aggregate_metadata(assembly: &RawSnapshotAssembly) -> AuditRes
             object.get("record_kind").and_then(Value::as_str) != Some("host_id_fragment")
         })
         .collect();
-    if observations.len() != assembly.observation_items {
-        return Err(AuditError::new("SNAPSHOT_OBSERVATION_COUNT_INVALID"));
+    if assembly.kind == SnapshotKind::DirectAccess && assembly.is_snapshot {
+        let observations: Vec<_> = semantic_items
+            .iter()
+            .copied()
+            .filter(|object| {
+                object.get("record_kind").and_then(Value::as_str) == Some("observation")
+            })
+            .collect();
+        let references = semantic_items
+            .iter()
+            .filter(|object| {
+                object.get("record_kind").and_then(Value::as_str) == Some("object_reference")
+            })
+            .count();
+        if observations.len() != assembly.observation_items
+            || assembly.direct_access_reference_items != Some(references)
+            || observations.len().saturating_add(references) != semantic_items.len()
+        {
+            return Err(AuditError::new("SNAPSHOT_OBSERVATION_COUNT_INVALID"));
+        }
+        let metadata_errors = observations.iter().try_fold(0_u64, |sum, item| {
+            let count = required_u64(item, "metadata_error_count")?;
+            sum.checked_add(count)
+                .ok_or_else(|| AuditError::new("DIRECT_ACCESS_CHUNK_METADATA_INVALID"))
+        })?;
+        if assembly.direct_access_error_count != Some(metadata_errors) {
+            return Err(AuditError::new("DIRECT_ACCESS_CHUNK_METADATA_INVALID"));
+        }
+    } else {
+        if semantic_items.len() != assembly.observation_items {
+            return Err(AuditError::new("SNAPSHOT_OBSERVATION_COUNT_INVALID"));
+        }
     }
     if !assembly.is_snapshot {
-        let first = observations
+        let first = semantic_items
             .first()
             .and_then(|item| item.get("observation_seq"))
             .and_then(Value::as_u64);
-        let last = observations
+        let last = semantic_items
             .last()
             .and_then(|item| item.get("observation_seq"))
             .and_then(Value::as_u64);
@@ -2464,13 +2638,148 @@ fn validate_chunk_aggregate_metadata(assembly: &RawSnapshotAssembly) -> AuditRes
             return Err(AuditError::new("FEEDBACK_CHUNK_METADATA_INVALID"));
         }
     }
-    if assembly.kind == SnapshotKind::DirectAccess && assembly.is_snapshot {
-        let metadata_errors = observations.iter().try_fold(0_u64, |sum, item| {
-            required_u64(item, "metadata_error_count").map(|count| sum.saturating_add(count))
-        })?;
-        if assembly.direct_access_error_count != Some(metadata_errors) {
-            return Err(AuditError::new("DIRECT_ACCESS_CHUNK_METADATA_INVALID"));
+    Ok(())
+}
+
+fn direct_access_reference_kind(value: &str) -> Option<DirectAccessReferenceKind> {
+    match value {
+        "ancestor_cycle" => Some(DirectAccessReferenceKind::AncestorCycle),
+        "shared_reference" => Some(DirectAccessReferenceKind::SharedReference),
+        _ => None,
+    }
+}
+
+fn validate_direct_access_root_frontier(assembly: &RawSnapshotAssembly) -> AuditResult<()> {
+    let base_object_id = assembly
+        .direct_access_base_object_id
+        .ok_or_else(|| AuditError::new("DIRECT_ACCESS_GRAPH_INVALID"))?;
+    let root_child_count = assembly
+        .direct_access_root_child_count
+        .ok_or_else(|| AuditError::new("DIRECT_ACCESS_GRAPH_INVALID"))?;
+    let semantic_objects: Vec<_> = assembly
+        .items
+        .iter()
+        .filter_map(Value::as_object)
+        .filter(|object| {
+            object.get("record_kind").and_then(Value::as_str) != Some("host_id_fragment")
+        })
+        .collect();
+    let expected_semantic_items = usize::try_from(root_child_count)
+        .ok()
+        .and_then(|count| count.checked_add(1))
+        .ok_or_else(|| AuditError::new("DIRECT_ACCESS_GRAPH_INVALID"))?;
+    if assembly.direct_access_projection.as_deref() != Some(DIRECT_ACCESS_PROJECTION)
+        || assembly.direct_access_scope_depth != Some(1)
+        || assembly.direct_access_scope_complete != Some(true)
+        || assembly.direct_access_host_graph_complete != Some(false)
+        || assembly.direct_access_authoritative_for_track_enumeration != Some(false)
+        || base_object_id > MAX_DIRECT_ACCESS_OBJECT_ID
+        || root_child_count > 128
+        || semantic_objects.is_empty()
+        || semantic_objects.len() != expected_semantic_items
+    {
+        return Err(AuditError::new("DIRECT_ACCESS_GRAPH_INVALID"));
+    }
+
+    let root = semantic_objects[0];
+    if root.get("record_kind").and_then(Value::as_str) != Some("observation")
+        || root.get("object_id").and_then(Value::as_u64) != Some(base_object_id)
+        || !root.get("parent_id").is_some_and(Value::is_null)
+        || root.get("depth").and_then(Value::as_u64) != Some(0)
+        || !root.get("child_index").is_some_and(Value::is_null)
+        || root.get("child_count").and_then(Value::as_u64) != Some(root_child_count)
+        || root.get("children_expanded").and_then(Value::as_bool) != Some(true)
+        || !root
+            .get("child_enumeration_error")
+            .is_some_and(Value::is_null)
+    {
+        return Err(AuditError::new("DIRECT_ACCESS_GRAPH_INVALID"));
+    }
+
+    let mut seen_observations = vec![base_object_id];
+    let mut seen_indices = HashMap::from([(base_object_id, 0usize)]);
+    let mut reference_count = 0_u64;
+    let mut cycle_count = 0_u64;
+    let mut shared_reference_count = 0_u64;
+    for (expected_child_index, object) in semantic_objects.into_iter().skip(1).enumerate() {
+        let expected_child_index = u64::try_from(expected_child_index)
+            .map_err(|_| AuditError::new("DIRECT_ACCESS_GRAPH_INVALID"))?;
+        let parent_id = required_u64(object, "parent_id")?;
+        let depth = required_u64(object, "depth")?;
+        let child_index = required_u64(object, "child_index")?;
+        if parent_id > MAX_DIRECT_ACCESS_OBJECT_ID
+            || parent_id != base_object_id
+            || child_index != expected_child_index
+            || depth != 1
+        {
+            return Err(AuditError::new("DIRECT_ACCESS_GRAPH_INVALID"));
         }
+
+        let object_id = required_u64(object, "object_id")?;
+        if object_id > MAX_DIRECT_ACCESS_OBJECT_ID {
+            return Err(AuditError::new("DIRECT_ACCESS_GRAPH_INVALID"));
+        }
+        match object.get("record_kind").and_then(Value::as_str) {
+            Some("observation") => {
+                let child_count = object.get("child_count").and_then(Value::as_u64);
+                if object.get("children_expanded").and_then(Value::as_bool) != Some(false)
+                    || child_count.is_none()
+                    || child_count.is_some_and(|count| count > MAX_DIRECT_ACCESS_OBJECT_ID)
+                    || !object
+                        .get("child_enumeration_error")
+                        .is_some_and(Value::is_null)
+                    || seen_indices.contains_key(&object_id)
+                {
+                    return Err(AuditError::new("DIRECT_ACCESS_GRAPH_INVALID"));
+                }
+                let observation_index = seen_observations.len();
+                seen_observations.push(object_id);
+                seen_indices.insert(object_id, observation_index);
+            }
+            Some("object_reference") => {
+                reference_count = reference_count
+                    .checked_add(1)
+                    .ok_or_else(|| AuditError::new("DIRECT_ACCESS_GRAPH_INVALID"))?;
+                let target_observation_index =
+                    usize::try_from(required_u64(object, "target_observation_index")?)
+                        .map_err(|_| AuditError::new("DIRECT_ACCESS_GRAPH_INVALID"))?;
+                if seen_observations.get(target_observation_index).copied() != Some(object_id)
+                    || seen_indices.get(&object_id).copied() != Some(target_observation_index)
+                {
+                    return Err(AuditError::new("DIRECT_ACCESS_GRAPH_INVALID"));
+                }
+                let target_is_ancestor = object_id == base_object_id;
+                let reference_kind = object
+                    .get("reference_kind")
+                    .and_then(Value::as_str)
+                    .and_then(direct_access_reference_kind)
+                    .ok_or_else(|| AuditError::new("DIRECT_ACCESS_GRAPH_INVALID"))?;
+                match (reference_kind, target_is_ancestor) {
+                    (DirectAccessReferenceKind::AncestorCycle, true) => {
+                        cycle_count = cycle_count
+                            .checked_add(1)
+                            .ok_or_else(|| AuditError::new("DIRECT_ACCESS_GRAPH_INVALID"))?;
+                    }
+                    (DirectAccessReferenceKind::SharedReference, false) => {
+                        shared_reference_count = shared_reference_count
+                            .checked_add(1)
+                            .ok_or_else(|| AuditError::new("DIRECT_ACCESS_GRAPH_INVALID"))?;
+                    }
+                    _ => return Err(AuditError::new("DIRECT_ACCESS_GRAPH_INVALID")),
+                }
+            }
+            _ => {
+                return Err(AuditError::new("DIRECT_ACCESS_GRAPH_INVALID"));
+            }
+        }
+    }
+
+    if assembly.direct_access_reference_items != usize::try_from(reference_count).ok()
+        || assembly.direct_access_cycle_count != Some(cycle_count)
+        || assembly.direct_access_shared_reference_count != Some(shared_reference_count)
+        || seen_observations.len() != assembly.observation_items
+    {
+        return Err(AuditError::new("DIRECT_ACCESS_GRAPH_INVALID"));
     }
     Ok(())
 }
@@ -2498,7 +2807,17 @@ fn validate_snapshot_privacy(assembly: &RawSnapshotAssembly) -> AuditResult<()> 
                 validate_bank_observation_privacy(object, assembly, &mut authorized_refs)?
             }
             (SnapshotKind::DirectAccess, true) => {
-                validate_direct_access_observation_privacy(object, assembly, &mut authorized_refs)?
+                match object.get("record_kind").and_then(Value::as_str) {
+                    Some("observation") => validate_direct_access_observation_privacy(
+                        object,
+                        assembly,
+                        &mut authorized_refs,
+                    )?,
+                    Some("object_reference") => {
+                        validate_direct_access_reference_privacy(object, assembly)?
+                    }
+                    _ => return Err(AuditError::new("DIRECT_ACCESS_RECORD_KIND_INVALID")),
+                }
             }
             (SnapshotKind::DirectAccess, false) => validate_direct_access_feedback_privacy(object)?,
         }
@@ -2739,6 +3058,7 @@ fn validate_direct_access_observation_privacy(
         "mixer_index",
         "mixer_zone",
         "child_count",
+        "children_expanded",
         "child_enumeration_error",
         "metadata_error_count",
         "metadata_errors",
@@ -2763,6 +3083,10 @@ fn validate_direct_access_observation_privacy(
         || !is_nullable_number(object.get("mixer_index"))
         || !is_nullable_number(object.get("mixer_zone"))
         || !is_nullable_u64(object.get("child_count"))
+        || object
+            .get("children_expanded")
+            .and_then(Value::as_bool)
+            .is_none()
     {
         return Err(AuditError::new("DIRECT_ACCESS_OBSERVATION_PRIVACY_INVALID"));
     }
@@ -2829,6 +3153,47 @@ fn validate_direct_access_observation_privacy(
             ))
     }) {
         return Err(AuditError::new("DIRECT_ACCESS_ERROR_CODE_INVALID"));
+    }
+    Ok(())
+}
+
+fn validate_direct_access_reference_privacy(
+    object: &Map<String, Value>,
+    assembly: &RawSnapshotAssembly,
+) -> AuditResult<()> {
+    const KEYS: [&str; 9] = [
+        "record_kind",
+        "observation_epoch",
+        "observation_epoch_status",
+        "object_id",
+        "parent_id",
+        "depth",
+        "child_index",
+        "target_observation_index",
+        "reference_kind",
+    ];
+    if object.len() != KEYS.len()
+        || KEYS.iter().any(|key| !object.contains_key(*key))
+        || object.get("record_kind").and_then(Value::as_str) != Some("object_reference")
+        || object.get("observation_epoch").and_then(Value::as_u64) != assembly.observation_epoch
+        || object
+            .get("observation_epoch_status")
+            .and_then(Value::as_str)
+            != Some("snapshot_observed")
+        || object.get("object_id").and_then(Value::as_u64).is_none()
+        || object.get("parent_id").and_then(Value::as_u64).is_none()
+        || object.get("depth").and_then(Value::as_u64).is_none()
+        || object.get("child_index").and_then(Value::as_u64).is_none()
+        || object
+            .get("target_observation_index")
+            .and_then(Value::as_u64)
+            .is_none()
+        || !matches!(
+            object.get("reference_kind").and_then(Value::as_str),
+            Some("ancestor_cycle" | "shared_reference")
+        )
+    {
+        return Err(AuditError::new("DIRECT_ACCESS_REFERENCE_PRIVACY_INVALID"));
     }
     Ok(())
 }
@@ -3975,7 +4340,12 @@ fn validate_commands(
             }
         }
         if bank_operation(checkpoint_id).is_some() {
-            validate_navigation_generation(evidence, actual_ids)?;
+            validate_navigation_generation(
+                evidence,
+                checkpoint_id,
+                actual_ids,
+                same_script_reactivated,
+            )?;
         }
         validate_final_projection_isolation(checkpoint_id, evidence, actual_ids)?;
         let final_request_id = actual_ids
@@ -4179,8 +4549,14 @@ fn final_snapshot_anchor(
     Ok(response.received_monotonic_timestamp_ms)
 }
 
-fn validate_navigation_generation(evidence: &Evidence, request_ids: &[String]) -> AuditResult<()> {
-    let mut generations = Vec::new();
+fn validate_navigation_generation(
+    evidence: &Evidence,
+    checkpoint_id: &'static str,
+    request_ids: &[String],
+    same_script_reactivated: bool,
+) -> AuditResult<()> {
+    let mut operation = None;
+    let mut final_snapshot = None;
     for request_id in request_ids {
         let command = evidence
             .commands
@@ -4206,9 +4582,54 @@ fn validate_navigation_generation(evidence: &Evidence, request_ids: &[String]) -
             ))
             .and_then(|assembly| assembly.bank_generation)
             .ok_or_else(|| AuditError::new("NAVIGATION_GENERATION_INVALID"))?;
-        generations.push(generation);
+        if command.method == "probe.bank.snapshot" {
+            final_snapshot = Some((command, snapshot, generation));
+        } else {
+            operation = Some((command, snapshot, generation));
+        }
     }
-    if generations.len() != 2 || generations[0] != generations[1] {
+    let Some((operation_command, operation_snapshot, operation_generation)) = operation else {
+        return Err(AuditError::new("NAVIGATION_GENERATION_INVALID"));
+    };
+    let Some((final_command, final_snapshot, final_generation)) = final_snapshot else {
+        return Err(AuditError::new("NAVIGATION_GENERATION_INVALID"));
+    };
+    if operation_command.config_id != final_command.config_id
+        || operation_snapshot.source_instance_id != final_snapshot.source_instance_id
+    {
+        return Err(AuditError::new("NAVIGATION_GENERATION_INVALID"));
+    }
+    if !same_script_reactivated {
+        if operation_generation != final_generation {
+            return Err(AuditError::new("NAVIGATION_GENERATION_INVALID"));
+        }
+        return Ok(());
+    }
+
+    let mut page_activations = evidence.snapshots.iter().filter(|snapshot| {
+        snapshot.checkpoint_id == checkpoint_id
+            && snapshot.source_instance_id == operation_snapshot.source_instance_id
+            && snapshot.kind == SnapshotKind::Bank
+            && snapshot.config_id == operation_command.config_id
+            && snapshot.reason == "page_activate"
+    });
+    let page_activation = page_activations
+        .next()
+        .ok_or_else(|| AuditError::new("NAVIGATION_GENERATION_INVALID"))?;
+    if page_activations.next().is_some() {
+        return Err(AuditError::new("NAVIGATION_GENERATION_INVALID"));
+    }
+    let page_activation_generation = evidence
+        .raw_snapshots
+        .get(&(
+            page_activation.source_instance_id.clone(),
+            page_activation.snapshot_id.clone(),
+        ))
+        .and_then(|assembly| assembly.bank_generation)
+        .ok_or_else(|| AuditError::new("NAVIGATION_GENERATION_INVALID"))?;
+    if operation_generation.checked_add(1) != Some(page_activation_generation)
+        || final_generation != page_activation_generation
+    {
         return Err(AuditError::new("NAVIGATION_GENERATION_INVALID"));
     }
     Ok(())
@@ -4909,6 +5330,7 @@ fn build_direct_access_projection(
     aliases: &mut AliasState,
 ) -> SemanticProjection {
     let mut nodes = Vec::new();
+    let mut references = Vec::new();
     let mut missing_count = 0usize;
     let mut duplicate_count = 0usize;
     let mut unknown_count = 0usize;
@@ -4928,6 +5350,7 @@ fn build_direct_access_projection(
         match object.get("record_kind").and_then(Value::as_str) {
             Some("host_id_fragment") => continue,
             Some("observation") => {}
+            Some("object_reference") => continue,
             _ => {
                 unknown_count += 1;
                 continue;
@@ -5025,14 +5448,82 @@ fn build_direct_access_projection(
             mixer_index: object.get("mixer_index").and_then(Value::as_f64),
             mixer_zone: object.get("mixer_zone").and_then(Value::as_f64),
             child_count: object.get("child_count").and_then(Value::as_u64),
+            children_expanded: object
+                .get("children_expanded")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             metadata_error_count: object.get("metadata_error_count").and_then(Value::as_u64),
             redacted_string_count: source_redacted_count,
         });
     }
+    for item in &assembly.items {
+        let Some(object) = item.as_object().filter(|object| {
+            object.get("record_kind").and_then(Value::as_str) == Some("object_reference")
+        }) else {
+            continue;
+        };
+        let Some(parent_id) = object.get("parent_id").and_then(Value::as_u64) else {
+            unknown_count += 1;
+            continue;
+        };
+        let Some(target_id) = object.get("object_id").and_then(Value::as_u64) else {
+            unknown_count += 1;
+            continue;
+        };
+        let Some(depth) = object.get("depth").and_then(Value::as_u64) else {
+            unknown_count += 1;
+            continue;
+        };
+        let Some(child_index) = object.get("child_index").and_then(Value::as_u64) else {
+            unknown_count += 1;
+            continue;
+        };
+        let Some(target_observation_index) = object
+            .get("target_observation_index")
+            .and_then(Value::as_u64)
+        else {
+            unknown_count += 1;
+            continue;
+        };
+        let Some(reference_kind) = object
+            .get("reference_kind")
+            .and_then(Value::as_str)
+            .and_then(direct_access_reference_kind)
+        else {
+            unknown_count += 1;
+            continue;
+        };
+        references.push(DirectAccessReferenceProjection {
+            reference_index: references.len(),
+            depth,
+            child_index,
+            target_observation_index,
+            parent_alias: aliases.object_alias(&assembly.source_instance_id, parent_id),
+            target_alias: aliases.object_alias(&assembly.source_instance_id, target_id),
+            reference_kind,
+        });
+    }
+    let cycle_reference_count = references
+        .iter()
+        .filter(|reference| reference.reference_kind == DirectAccessReferenceKind::AncestorCycle)
+        .count();
+    let shared_reference_count = references.len().saturating_sub(cycle_reference_count);
     let (p05_title, p09_title) = fixture_title_comparisons(&assembly.items, fixture_acceptance);
     SemanticProjection::DirectAccess {
         checkpoint_id,
+        scope: DIRECT_ACCESS_PROJECTION,
+        scope_depth: assembly.direct_access_scope_depth.unwrap_or(0),
+        scope_complete: assembly.direct_access_scope_complete.unwrap_or(false),
+        host_graph_complete: assembly.direct_access_host_graph_complete.unwrap_or(false),
+        root_child_count: assembly.direct_access_root_child_count.unwrap_or(0),
+        authoritative_for_track_enumeration: assembly
+            .direct_access_authoritative_for_track_enumeration
+            .unwrap_or(false),
         total_wire_items: assembly.items.len(),
+        observation_count: nodes.len(),
+        reference_count: references.len(),
+        cycle_reference_count,
+        shared_reference_count,
         missing_count,
         duplicate_count,
         unknown_count,
@@ -5045,6 +5536,7 @@ fn build_direct_access_projection(
         p05_title,
         p09_title,
         nodes,
+        references,
     }
 }
 
@@ -5309,7 +5801,9 @@ fn validate_capabilities(profile: Profile, result: &Value) -> AuditResult<bool> 
         ],
     ) || object.get("read_only").and_then(Value::as_bool) != Some(true)
         || object.get("integrity_failed").and_then(Value::as_bool) != Some(false)
-        || object.get("host_version").and_then(Value::as_str) != Some(profile.expected_host().1)
+        || !object
+            .get("host_version")
+            .is_some_and(|version| profile.accepts_probe_host_version(version))
     {
         return Err(AuditError::new("CAPABILITY_RESULT_INVALID"));
     }
@@ -5365,6 +5859,9 @@ fn validate_capabilities(profile: Profile, result: &Value) -> AuditResult<bool> 
             "supported",
             "active",
             "activation_error",
+            "projection",
+            "scope_depth",
+            "authoritative_for_track_enumeration",
             "get_object_unique_name_v1_2",
             "get_object_unique_id_string_v1_2",
             "get_object_title_v1_2",
@@ -5375,6 +5872,15 @@ fn validate_capabilities(profile: Profile, result: &Value) -> AuditResult<bool> 
             "reason",
         ],
     ) {
+        return Err(AuditError::new("DIRECT_ACCESS_CAPABILITY_INVALID"));
+    }
+    if direct_access.get("projection").and_then(Value::as_str) != Some(DIRECT_ACCESS_PROJECTION)
+        || direct_access.get("scope_depth").and_then(Value::as_u64) != Some(1)
+        || direct_access
+            .get("authoritative_for_track_enumeration")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
         return Err(AuditError::new("DIRECT_ACCESS_CAPABILITY_INVALID"));
     }
     let supported = direct_access.get("supported").and_then(Value::as_bool);
@@ -5420,7 +5926,7 @@ fn validate_capability_limits(object: &Map<String, Value>) -> AuditResult<()> {
         ("host_id_fragments", 16),
         ("wire_items_per_snapshot", 1_024),
         ("direct_access_nodes", 256),
-        ("direct_access_depth", 32),
+        ("direct_access_depth", 1),
         ("direct_access_children", 128),
     ];
     if limits.len() != expected.len()
@@ -5570,6 +6076,12 @@ fn capability_report(result: &Value) -> AuditResult<CapabilityReport> {
         direct_access: DirectAccessCapabilityReport {
             supported: required_bool(direct, "supported")?,
             active: required_bool(direct, "active")?,
+            projection: DIRECT_ACCESS_PROJECTION,
+            scope_depth: required_u64(direct, "scope_depth")?,
+            authoritative_for_track_enumeration: required_bool(
+                direct,
+                "authoritative_for_track_enumeration",
+            )?,
             unique_name: features.unique_name,
             unique_name_policy: "not_invoked",
             unique_id: features.unique_id,
@@ -6396,6 +6908,130 @@ mod tests {
     const COLLECTOR_HASH: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const COMMIT_HASH: &str = "cccccccccccccccccccccccccccccccccccccccc";
 
+    fn direct_access_test_observation(
+        observation_epoch: u64,
+        object_id: u64,
+        parent_id: Option<u64>,
+        depth: u64,
+        child_index: Option<u64>,
+        child_count: u64,
+    ) -> Value {
+        json!({
+            "record_kind": "observation",
+            "observation_epoch": observation_epoch,
+            "observation_epoch_status": "snapshot_observed",
+            "object_id": object_id,
+            "parent_id": parent_id,
+            "depth": depth,
+            "child_index": child_index,
+            "unique_name": null,
+            "unique_name_redacted": true,
+            "unique_name_status": "not_invoked_by_policy",
+            "host_id_raw": null,
+            "host_id_redacted": false,
+            "host_id_byte_length": null,
+            "host_id_ref": null,
+            "host_id_fragment_count": 0,
+            "title": null,
+            "title_redacted": false,
+            "type_name": null,
+            "type_name_redacted": false,
+            "mixer_visible": null,
+            "mixer_index": null,
+            "mixer_zone": null,
+            "child_count": child_count,
+            "children_expanded": depth == 0,
+            "child_enumeration_error": null,
+            "metadata_error_count": 0,
+            "metadata_errors": [],
+            "redacted_string_count": 1
+        })
+    }
+
+    fn direct_access_test_reference(
+        observation_epoch: u64,
+        object_id: u64,
+        parent_id: u64,
+        depth: u64,
+        child_index: u64,
+        target_observation_index: u64,
+        reference_kind: &str,
+    ) -> Value {
+        json!({
+            "record_kind": "object_reference",
+            "observation_epoch": observation_epoch,
+            "observation_epoch_status": "snapshot_observed",
+            "object_id": object_id,
+            "parent_id": parent_id,
+            "depth": depth,
+            "child_index": child_index,
+            "target_observation_index": target_observation_index,
+            "reference_kind": reference_kind
+        })
+    }
+
+    fn direct_access_test_assembly(
+        items: Vec<Value>,
+        observation_items: usize,
+        reference_items: usize,
+        cycle_count: u64,
+        shared_reference_count: u64,
+    ) -> RawSnapshotAssembly {
+        let item_count = items.len();
+        let root_child_count = items
+            .first()
+            .and_then(|item| item.get("child_count"))
+            .and_then(Value::as_u64);
+        RawSnapshotAssembly {
+            checkpoint_id: "INIT",
+            source_instance_id: "SECRET_GRAPH_SOURCE".into(),
+            kind: SnapshotKind::DirectAccess,
+            is_snapshot: true,
+            config_id: None,
+            reason: "page_activate".into(),
+            observation_epoch: Some(7),
+            observation_epoch_status: Some("snapshot_observed".into()),
+            bank_generation: None,
+            observation_items,
+            first_observation_seq: None,
+            last_observation_seq: None,
+            remaining_feedback_items: None,
+            direct_access_base_object_id: Some(0),
+            direct_access_projection: Some(DIRECT_ACCESS_PROJECTION.into()),
+            direct_access_scope_depth: Some(1),
+            direct_access_scope_complete: Some(true),
+            direct_access_host_graph_complete: Some(false),
+            direct_access_root_child_count: root_child_count,
+            direct_access_authoritative_for_track_enumeration: Some(false),
+            direct_access_reference_items: Some(reference_items),
+            direct_access_cycle_count: Some(cycle_count),
+            direct_access_shared_reference_count: Some(shared_reference_count),
+            direct_access_error_count: Some(0),
+            chunk_count: 1,
+            next_chunk: 1,
+            total_items: item_count,
+            items,
+            item_positions: vec![
+                ProbePosition {
+                    monotonic_timestamp_ms: 1,
+                    record_index: 1,
+                };
+                item_count
+            ],
+            chunk_positions: vec![ProbePosition {
+                monotonic_timestamp_ms: 1,
+                record_index: 1,
+            }],
+            completed: true,
+        }
+    }
+
+    fn validate_direct_access_test_assembly(assembly: &RawSnapshotAssembly) -> AuditResult<()> {
+        validate_snapshot_privacy(assembly)?;
+        validate_chunk_aggregate_metadata(assembly)?;
+        validate_direct_access_root_frontier(assembly)
+    }
+
     struct TestArtifact {
         manifest: Value,
         records: Vec<Value>,
@@ -6535,7 +7171,10 @@ mod tests {
             json!({
                 "read_only": true,
                 "integrity_failed": false,
-                "host_version": profile.expected_host().1,
+                "host_version": match profile {
+                    Profile::C13MixerBank => Value::Null,
+                    Profile::C15Combined => Value::String(profile.expected_probe_host_version().into()),
+                },
                 "data_minimization": {
                     "source_redaction": true,
                     "fixture_revision": 2,
@@ -6566,6 +7205,9 @@ mod tests {
                     "supported": direct_access_required,
                     "active": direct_access_required,
                     "activation_error": null,
+                    "projection": DIRECT_ACCESS_PROJECTION,
+                    "scope_depth": 1,
+                    "authoritative_for_track_enumeration": false,
                     "get_object_unique_name_v1_2": direct_access_required,
                     "get_object_unique_id_string_v1_2": direct_access_required,
                     "get_object_title_v1_2": direct_access_required,
@@ -6585,7 +7227,7 @@ mod tests {
                     "host_id_fragments": 16,
                     "wire_items_per_snapshot": 1024,
                     "direct_access_nodes": 256,
-                    "direct_access_depth": 32,
+                    "direct_access_depth": 1,
                     "direct_access_children": 128
                 }
             })
@@ -6801,7 +7443,7 @@ mod tests {
                         "object_id": 42,
                         "parent_id": null,
                         "depth": 0,
-                        "child_index": 0,
+                        "child_index": null,
                         "unique_name": null,
                         "unique_name_redacted": direct_access_required,
                         "unique_name_status": if direct_access_required { "not_invoked_by_policy" } else { "not_available" },
@@ -6818,6 +7460,7 @@ mod tests {
                         "mixer_index": 0,
                         "mixer_zone": 0,
                         "child_count": 0,
+                        "children_expanded": true,
                         "child_enumeration_error": null,
                         "metadata_error_count": 0,
                         "metadata_errors": [],
@@ -6843,9 +7486,17 @@ mod tests {
                     });
                     if kind == SnapshotKind::DirectAccess {
                         data["base_object_id"] = json!(42);
+                        data["projection"] = json!(DIRECT_ACCESS_PROJECTION);
+                        data["scope_depth"] = json!(1);
+                        data["scope_complete"] = json!(true);
+                        data["host_graph_complete"] = json!(false);
+                        data["root_child_count"] = json!(0);
+                        data["authoritative_for_track_enumeration"] = json!(false);
                         data["observation_epoch"] = json!(self.observation_epoch);
                         data["observation_epoch_status"] = json!("snapshot_observed");
+                        data["reference_items"] = json!(0);
                         data["cycle_count"] = json!(0);
+                        data["shared_reference_count"] = json!(0);
                         data["error_count"] = json!(0);
                         data["truncation_reasons"] = json!([]);
                     } else {
@@ -7006,10 +7657,28 @@ mod tests {
                 "items": []
             });
             if kind == SnapshotKind::DirectAccess {
+                data["total_items"] = json!(1);
+                data["observation_items"] = json!(1);
+                data["items"] = json!([direct_access_test_observation(
+                    self.observation_epoch,
+                    42,
+                    None,
+                    0,
+                    None,
+                    0,
+                )]);
                 data["base_object_id"] = json!(42);
+                data["projection"] = json!(DIRECT_ACCESS_PROJECTION);
+                data["scope_depth"] = json!(1);
+                data["scope_complete"] = json!(true);
+                data["host_graph_complete"] = json!(false);
+                data["root_child_count"] = json!(0);
+                data["authoritative_for_track_enumeration"] = json!(false);
                 data["observation_epoch"] = json!(self.observation_epoch);
                 data["observation_epoch_status"] = json!("snapshot_observed");
+                data["reference_items"] = json!(0);
                 data["cycle_count"] = json!(0);
+                data["shared_reference_count"] = json!(0);
                 data["error_count"] = json!(0);
                 data["truncation_reasons"] = json!([]);
             } else {
@@ -7576,6 +8245,57 @@ mod tests {
         artifact.records.retain(|record| !predicate(record));
     }
 
+    fn set_bank_snapshot_generation(
+        artifact: &mut TestArtifact,
+        checkpoint_id: &str,
+        reason: &str,
+        config_id: Option<&str>,
+        generation: u64,
+    ) {
+        for data in artifact.records.iter_mut().filter_map(|record| {
+            let matches = record["record_type"] == "probe_event"
+                && record["checkpoint_id"] == checkpoint_id
+                && record["message"]["event"] == "probe.bank.chunk"
+                && record["message"]["data"]["stream"] == "mixer_bank_snapshot"
+                && record["message"]["data"]["reason"] == reason
+                && config_id
+                    .is_none_or(|config_id| record["message"]["data"]["config_id"] == config_id);
+            matches.then(|| &mut record["message"]["data"])
+        }) {
+            data["requested_bank_generation"] = json!(generation);
+            data["bank_generation"] = json!(generation);
+            for item in data["items"].as_array_mut().unwrap() {
+                item["bank_generation"] = json!(generation);
+                for observed_generation in item["field_observation_generation"]
+                    .as_object_mut()
+                    .unwrap()
+                    .values_mut()
+                {
+                    if observed_generation.as_u64().is_some() {
+                        *observed_generation = json!(generation);
+                    }
+                }
+            }
+        }
+    }
+
+    fn direct_access_command_snapshot_data_mut<'a>(
+        artifact: &'a mut TestArtifact,
+        checkpoint_id: &str,
+    ) -> &'a mut Value {
+        &mut artifact
+            .records
+            .iter_mut()
+            .find(|record| {
+                record["record_type"] == "probe_event"
+                    && record["checkpoint_id"] == checkpoint_id
+                    && record["message"]["event"] == "probe.direct_access.chunk"
+                    && record["message"]["data"]["stream"] == "direct_access_snapshot"
+                    && record["message"]["data"]["reason"] == "command_snapshot"
+            })
+            .expect("checkpoint has a DirectAccess command snapshot")["message"]["data"]
+    }
+
     fn move_response_before_command(
         artifact: &mut TestArtifact,
         checkpoint_id: &str,
@@ -7697,13 +8417,23 @@ mod tests {
                         "snapshot_complete": true,
                         "truncated": false,
                         "overflow_safe": true,
-                        "total_items": 0,
-                        "observation_items": 0,
+                        "total_items": 1,
+                        "observation_items": 1,
                         "base_object_id": 42,
+                        "projection": DIRECT_ACCESS_PROJECTION,
+                        "scope_depth": 1,
+                        "scope_complete": true,
+                        "host_graph_complete": false,
+                        "root_child_count": 0,
+                        "authoritative_for_track_enumeration": false,
+                        "reference_items": 0,
                         "cycle_count": 0,
+                        "shared_reference_count": 0,
                         "error_count": 0,
                         "truncation_reasons": [],
-                        "items": []
+                        "items": [direct_access_test_observation(
+                            observation_epoch, 42, None, 0, None, 0
+                        )]
                     }
                 }
             }),
@@ -7837,13 +8567,23 @@ mod tests {
                         "snapshot_complete": true,
                         "truncated": false,
                         "overflow_safe": true,
-                        "total_items": 0,
-                        "observation_items": 0,
+                        "total_items": 1,
+                        "observation_items": 1,
                         "base_object_id": 42,
+                        "projection": DIRECT_ACCESS_PROJECTION,
+                        "scope_depth": 1,
+                        "scope_complete": true,
+                        "host_graph_complete": false,
+                        "root_child_count": 0,
+                        "authoritative_for_track_enumeration": false,
+                        "reference_items": 0,
                         "cycle_count": 0,
+                        "shared_reference_count": 0,
                         "error_count": 0,
                         "truncation_reasons": [],
-                        "items": []
+                        "items": [direct_access_test_observation(
+                            0, 42, None, 0, None, 0
+                        )]
                     }
                 }
             }),
@@ -7885,6 +8625,34 @@ mod tests {
                 .unwrap()
                 + 1
         );
+    }
+
+    #[test]
+    fn probe_host_version_accepts_only_profile_allowed_values() {
+        let accepts = |profile: Profile, value: Value| profile.accepts_probe_host_version(&value);
+        assert!(accepts(Profile::C13MixerBank, json!("13.0.30")));
+        assert!(accepts(Profile::C13MixerBank, json!("13.0.30.226")));
+        assert!(accepts(Profile::C13MixerBank, Value::Null));
+        assert!(!accepts(Profile::C13MixerBank, json!("13.0.30.999")));
+        assert!(!accepts(Profile::C13MixerBank, json!("13.0.31")));
+        assert!(!accepts(Profile::C13MixerBank, json!("13.0.30-beta")));
+        assert!(!accepts(Profile::C13MixerBank, json!("13.0.30.226-extra")));
+        assert!(!accepts(Profile::C13MixerBank, json!(" 13.0.30")));
+        assert!(!accepts(Profile::C13MixerBank, json!(13)));
+        assert!(!accepts(Profile::C13MixerBank, json!({})));
+        assert!(!accepts(Profile::C13MixerBank, json!("15.0.30")));
+
+        assert!(accepts(Profile::C15Combined, json!("15.0.30")));
+        assert!(accepts(Profile::C15Combined, json!("15.0.30.287")));
+        assert!(!accepts(Profile::C15Combined, Value::Null));
+        assert!(!accepts(Profile::C15Combined, json!("15.0.30.999")));
+        assert!(!accepts(Profile::C15Combined, json!("15.0.31")));
+        assert!(!accepts(Profile::C15Combined, json!("15.0.30-beta")));
+        assert!(!accepts(Profile::C15Combined, json!("15.0.30.287-extra")));
+        assert!(!accepts(Profile::C15Combined, json!("15.0.30 ")));
+        assert!(!accepts(Profile::C15Combined, json!(15)));
+        assert!(!accepts(Profile::C15Combined, json!([])));
+        assert!(!accepts(Profile::C15Combined, json!("13.0.30")));
     }
 
     #[test]
@@ -7983,6 +8751,550 @@ mod tests {
         assert_eq!(
             audit_artifact(&bank_before_direct).unwrap_err().code,
             "CHECKPOINT_COMMAND_SEQUENCE_INVALID"
+        );
+    }
+
+    #[test]
+    fn direct_access_cycle_references_are_valid_and_projected_explicitly() {
+        let mut artifact = valid_artifact(Profile::C15Combined);
+        let data = direct_access_command_snapshot_data_mut(&mut artifact, "E1");
+        let epoch = data["observation_epoch"].as_u64().unwrap();
+        data["items"][0]["child_count"] = json!(1);
+        data["root_child_count"] = json!(1);
+        data["items"]
+            .as_array_mut()
+            .unwrap()
+            .push(direct_access_test_reference(
+                epoch,
+                42,
+                42,
+                1,
+                0,
+                0,
+                "ancestor_cycle",
+            ));
+        data["total_items"] = json!(2);
+        data["observation_items"] = json!(1);
+        data["reference_items"] = json!(1);
+        data["cycle_count"] = json!(1);
+        data["shared_reference_count"] = json!(0);
+
+        let report = audit_artifact(&artifact).unwrap();
+        assert_eq!(report.audit_report_version, 2);
+        let projection = report
+            .projections
+            .iter()
+            .find(|projection| {
+                matches!(
+                    projection,
+                    SemanticProjection::DirectAccess {
+                        checkpoint_id: "E1",
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        match projection {
+            SemanticProjection::DirectAccess {
+                scope,
+                scope_depth,
+                scope_complete,
+                host_graph_complete,
+                root_child_count,
+                authoritative_for_track_enumeration,
+                observation_count,
+                reference_count,
+                cycle_reference_count,
+                shared_reference_count,
+                unknown_count,
+                references,
+                ..
+            } => {
+                assert_eq!(*scope, DIRECT_ACCESS_PROJECTION);
+                assert_eq!(*scope_depth, 1);
+                assert!(*scope_complete);
+                assert!(!*host_graph_complete);
+                assert_eq!(*root_child_count, 1);
+                assert!(!*authoritative_for_track_enumeration);
+                assert_eq!(*observation_count, 1);
+                assert_eq!(*reference_count, 1);
+                assert_eq!(*cycle_reference_count, 1);
+                assert_eq!(*shared_reference_count, 0);
+                assert_eq!(*unknown_count, 0);
+                assert_eq!(references.len(), 1);
+                assert_eq!(references[0].reference_index, 0);
+                assert_eq!(references[0].target_observation_index, 0);
+                assert_eq!(references[0].parent_alias, references[0].target_alias);
+                assert_eq!(
+                    references[0].reference_kind,
+                    DirectAccessReferenceKind::AncestorCycle
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn direct_access_shared_references_and_unexpanded_child_counts_are_complete() {
+        let shared = direct_access_test_assembly(
+            vec![
+                direct_access_test_observation(7, 0, None, 0, None, 3),
+                direct_access_test_observation(7, 1, Some(0), 1, Some(0), 500),
+                direct_access_test_observation(7, 2, Some(0), 1, Some(1), 7),
+                direct_access_test_reference(7, 1, 0, 1, 2, 1, "shared_reference"),
+            ],
+            3,
+            1,
+            0,
+            1,
+        );
+        validate_direct_access_test_assembly(&shared).unwrap();
+        assert_eq!(shared.items[1]["children_expanded"].as_bool(), Some(false));
+        assert_eq!(shared.items[1]["child_count"].as_u64(), Some(500));
+    }
+
+    #[test]
+    fn direct_access_graph_rejects_dangling_misclassified_count_and_missing_edges() {
+        let mut extra_field_reference =
+            direct_access_test_reference(7, 0, 0, 1, 0, 0, "ancestor_cycle");
+        extra_field_reference["unexpected"] = json!("not allowed");
+        let extra_field = direct_access_test_assembly(
+            vec![
+                direct_access_test_observation(7, 0, None, 0, None, 1),
+                extra_field_reference,
+            ],
+            1,
+            1,
+            1,
+            0,
+        );
+        assert_eq!(
+            validate_direct_access_test_assembly(&extra_field)
+                .unwrap_err()
+                .code,
+            "DIRECT_ACCESS_REFERENCE_PRIVACY_INVALID"
+        );
+
+        let dangling = direct_access_test_assembly(
+            vec![
+                direct_access_test_observation(7, 0, None, 0, None, 1),
+                direct_access_test_reference(7, 99, 0, 1, 0, 0, "shared_reference"),
+            ],
+            1,
+            1,
+            0,
+            1,
+        );
+        assert_eq!(
+            validate_direct_access_test_assembly(&dangling)
+                .unwrap_err()
+                .code,
+            "DIRECT_ACCESS_GRAPH_INVALID"
+        );
+
+        let misclassified = direct_access_test_assembly(
+            vec![
+                direct_access_test_observation(7, 0, None, 0, None, 1),
+                direct_access_test_reference(7, 0, 0, 1, 0, 0, "shared_reference"),
+            ],
+            1,
+            1,
+            0,
+            1,
+        );
+        assert_eq!(
+            validate_direct_access_test_assembly(&misclassified)
+                .unwrap_err()
+                .code,
+            "DIRECT_ACCESS_GRAPH_INVALID"
+        );
+
+        let count_mismatch = direct_access_test_assembly(
+            vec![
+                direct_access_test_observation(7, 0, None, 0, None, 1),
+                direct_access_test_reference(7, 0, 0, 1, 0, 0, "ancestor_cycle"),
+            ],
+            1,
+            1,
+            0,
+            1,
+        );
+        assert_eq!(
+            validate_direct_access_test_assembly(&count_mismatch)
+                .unwrap_err()
+                .code,
+            "DIRECT_ACCESS_GRAPH_INVALID"
+        );
+
+        let missing_edge = direct_access_test_assembly(
+            vec![direct_access_test_observation(7, 0, None, 0, None, 1)],
+            1,
+            0,
+            0,
+            0,
+        );
+        assert_eq!(
+            validate_direct_access_test_assembly(&missing_edge)
+                .unwrap_err()
+                .code,
+            "DIRECT_ACCESS_GRAPH_INVALID"
+        );
+    }
+
+    #[test]
+    fn direct_access_graph_rejects_forward_and_source_impossible_order() {
+        let forward_parent = direct_access_test_assembly(
+            vec![
+                direct_access_test_observation(7, 0, None, 0, None, 1),
+                direct_access_test_observation(7, 1, Some(2), 1, Some(0), 0),
+            ],
+            2,
+            0,
+            0,
+            0,
+        );
+        assert_eq!(
+            validate_direct_access_test_assembly(&forward_parent)
+                .unwrap_err()
+                .code,
+            "DIRECT_ACCESS_GRAPH_INVALID"
+        );
+
+        let forward_reference = direct_access_test_assembly(
+            vec![
+                direct_access_test_observation(7, 0, None, 0, None, 1),
+                direct_access_test_reference(7, 1, 0, 1, 0, 1, "shared_reference"),
+            ],
+            1,
+            1,
+            0,
+            1,
+        );
+        assert_eq!(
+            validate_direct_access_test_assembly(&forward_reference)
+                .unwrap_err()
+                .code,
+            "DIRECT_ACCESS_GRAPH_INVALID"
+        );
+
+        let reversed_siblings = direct_access_test_assembly(
+            vec![
+                direct_access_test_observation(7, 0, None, 0, None, 2),
+                direct_access_test_observation(7, 2, Some(0), 1, Some(1), 0),
+                direct_access_test_observation(7, 1, Some(0), 1, Some(0), 0),
+            ],
+            3,
+            0,
+            0,
+            0,
+        );
+        assert_eq!(
+            validate_direct_access_test_assembly(&reversed_siblings)
+                .unwrap_err()
+                .code,
+            "DIRECT_ACCESS_GRAPH_INVALID"
+        );
+
+        let duplicate_child_index = direct_access_test_assembly(
+            vec![
+                direct_access_test_observation(7, 0, None, 0, None, 2),
+                direct_access_test_observation(7, 1, Some(0), 1, Some(0), 0),
+                direct_access_test_observation(7, 2, Some(0), 1, Some(0), 0),
+            ],
+            3,
+            0,
+            0,
+            0,
+        );
+        assert_eq!(
+            validate_direct_access_test_assembly(&duplicate_child_index)
+                .unwrap_err()
+                .code,
+            "DIRECT_ACCESS_GRAPH_INVALID"
+        );
+    }
+
+    #[test]
+    fn direct_access_root_frontier_enforces_scope_ids_and_root_child_bound() {
+        let mut unsafe_id = direct_access_test_assembly(
+            vec![direct_access_test_observation(
+                7,
+                MAX_DIRECT_ACCESS_OBJECT_ID + 1,
+                None,
+                0,
+                None,
+                0,
+            )],
+            1,
+            0,
+            0,
+            0,
+        );
+        unsafe_id.direct_access_base_object_id = Some(MAX_DIRECT_ACCESS_OBJECT_ID + 1);
+        assert_eq!(
+            validate_direct_access_test_assembly(&unsafe_id)
+                .unwrap_err()
+                .code,
+            "DIRECT_ACCESS_GRAPH_INVALID"
+        );
+
+        let mut child_limit_items = vec![direct_access_test_observation(7, 0, None, 0, None, 129)];
+        child_limit_items.extend((0_u64..129).map(|child_index| {
+            direct_access_test_reference(7, 0, 0, 1, child_index, 0, "ancestor_cycle")
+        }));
+        let child_limit = direct_access_test_assembly(child_limit_items, 1, 129, 129, 0);
+        assert_eq!(
+            validate_direct_access_test_assembly(&child_limit)
+                .unwrap_err()
+                .code,
+            "DIRECT_ACCESS_GRAPH_INVALID"
+        );
+
+        let depth_two = direct_access_test_assembly(
+            vec![
+                direct_access_test_observation(7, 0, None, 0, None, 1),
+                direct_access_test_observation(7, 1, Some(0), 2, Some(0), 0),
+            ],
+            2,
+            0,
+            0,
+            0,
+        );
+        assert_eq!(
+            validate_direct_access_test_assembly(&depth_two)
+                .unwrap_err()
+                .code,
+            "DIRECT_ACCESS_GRAPH_INVALID"
+        );
+
+        let mut host_graph_complete = direct_access_test_assembly(
+            vec![direct_access_test_observation(7, 0, None, 0, None, 0)],
+            1,
+            0,
+            0,
+            0,
+        );
+        host_graph_complete.direct_access_host_graph_complete = Some(true);
+        assert_eq!(
+            validate_direct_access_test_assembly(&host_graph_complete)
+                .unwrap_err()
+                .code,
+            "DIRECT_ACCESS_GRAPH_INVALID"
+        );
+
+        let mut expanded_child = direct_access_test_assembly(
+            vec![
+                direct_access_test_observation(7, 0, None, 0, None, 1),
+                direct_access_test_observation(7, 1, Some(0), 1, Some(0), 3),
+            ],
+            2,
+            0,
+            0,
+            0,
+        );
+        expanded_child.items[1]["children_expanded"] = json!(true);
+        assert_eq!(
+            validate_direct_access_test_assembly(&expanded_child)
+                .unwrap_err()
+                .code,
+            "DIRECT_ACCESS_GRAPH_INVALID"
+        );
+
+        let mut unexpanded_root = direct_access_test_assembly(
+            vec![direct_access_test_observation(7, 0, None, 0, None, 0)],
+            1,
+            0,
+            0,
+            0,
+        );
+        unexpanded_root.items[0]["children_expanded"] = json!(false);
+        assert_eq!(
+            validate_direct_access_test_assembly(&unexpanded_root)
+                .unwrap_err()
+                .code,
+            "DIRECT_ACCESS_GRAPH_INVALID"
+        );
+    }
+
+    #[test]
+    fn direct_access_chunk_scope_metadata_is_exact() {
+        let mut host_graph_complete = valid_artifact(Profile::C15Combined);
+        direct_access_command_snapshot_data_mut(&mut host_graph_complete, "E1")["host_graph_complete"] =
+            json!(true);
+        assert_eq!(
+            audit_artifact(&host_graph_complete).unwrap_err().code,
+            "DIRECT_ACCESS_CHUNK_METADATA_INVALID"
+        );
+
+        let mut incomplete_scope = valid_artifact(Profile::C15Combined);
+        direct_access_command_snapshot_data_mut(&mut incomplete_scope, "E1")["scope_complete"] =
+            json!(false);
+        assert_eq!(
+            audit_artifact(&incomplete_scope).unwrap_err().code,
+            "DIRECT_ACCESS_CHUNK_METADATA_INVALID"
+        );
+
+        let mut missing_projection = valid_artifact(Profile::C15Combined);
+        direct_access_command_snapshot_data_mut(&mut missing_projection, "E1")
+            .as_object_mut()
+            .unwrap()
+            .remove("projection");
+        assert_eq!(
+            audit_artifact(&missing_projection).unwrap_err().code,
+            "SNAPSHOT_CHUNK_SCHEMA_INVALID"
+        );
+    }
+
+    #[test]
+    fn direct_access_chunk_graph_metadata_is_stable_across_chunks() {
+        let root = direct_access_test_observation(7, 0, None, 0, None, 2);
+        let child = direct_access_test_observation(7, 1, Some(0), 1, Some(0), 9);
+        let reference = direct_access_test_reference(7, 0, 0, 1, 1, 0, "ancestor_cycle");
+        let make_chunk = |chunk_index: u64,
+                          items: Vec<Value>,
+                          base_object_id: u64,
+                          root_child_count: u64,
+                          cycle_count: u64,
+                          shared_reference_count: u64| {
+            json!({
+                "snapshot_id": "SECRET_MULTICHUNK_GRAPH",
+                "stream": "direct_access_snapshot",
+                "reason": "page_activate",
+                "chunk_index": chunk_index,
+                "chunk_count": 2,
+                "total_items": 3,
+                "items": items,
+                "snapshot_complete": chunk_index == 1,
+                "truncated": false,
+                "overflow_safe": true,
+                "observation_items": 2,
+                "base_object_id": base_object_id,
+                "projection": DIRECT_ACCESS_PROJECTION,
+                "scope_depth": 1,
+                "scope_complete": true,
+                "host_graph_complete": false,
+                "root_child_count": root_child_count,
+                "authoritative_for_track_enumeration": false,
+                "observation_epoch": 7,
+                "observation_epoch_status": "snapshot_observed",
+                "reference_items": 1,
+                "cycle_count": cycle_count,
+                "shared_reference_count": shared_reference_count,
+                "error_count": 0,
+                "truncation_reasons": []
+            })
+        };
+
+        let first = make_chunk(0, vec![root.clone(), child.clone()], 0, 2, 1, 0);
+        let changed_base = make_chunk(1, vec![reference.clone()], 1, 2, 1, 0);
+        let mut evidence = Evidence::default();
+        collect_snapshot_chunk(
+            &mut evidence,
+            "INIT",
+            "SECRET_GRAPH_SOURCE",
+            "probe.direct_access.chunk",
+            first.as_object().unwrap(),
+            1,
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            collect_snapshot_chunk(
+                &mut evidence,
+                "INIT",
+                "SECRET_GRAPH_SOURCE",
+                "probe.direct_access.chunk",
+                changed_base.as_object().unwrap(),
+                2,
+                2,
+            )
+            .unwrap_err()
+            .code,
+            "SNAPSHOT_CHUNK_SEQUENCE_INVALID"
+        );
+
+        let first = make_chunk(0, vec![root.clone(), child.clone()], 0, 2, 1, 0);
+        let changed_counts = make_chunk(1, vec![reference.clone()], 0, 2, 0, 1);
+        let mut evidence = Evidence::default();
+        collect_snapshot_chunk(
+            &mut evidence,
+            "INIT",
+            "SECRET_GRAPH_SOURCE",
+            "probe.direct_access.chunk",
+            first.as_object().unwrap(),
+            1,
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            collect_snapshot_chunk(
+                &mut evidence,
+                "INIT",
+                "SECRET_GRAPH_SOURCE",
+                "probe.direct_access.chunk",
+                changed_counts.as_object().unwrap(),
+                2,
+                2,
+            )
+            .unwrap_err()
+            .code,
+            "SNAPSHOT_CHUNK_SEQUENCE_INVALID"
+        );
+
+        let first = make_chunk(0, vec![root, child], 0, 2, 1, 0);
+        let changed_scope_count = make_chunk(1, vec![reference], 0, 1, 1, 0);
+        let mut evidence = Evidence::default();
+        collect_snapshot_chunk(
+            &mut evidence,
+            "INIT",
+            "SECRET_GRAPH_SOURCE",
+            "probe.direct_access.chunk",
+            first.as_object().unwrap(),
+            1,
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            collect_snapshot_chunk(
+                &mut evidence,
+                "INIT",
+                "SECRET_GRAPH_SOURCE",
+                "probe.direct_access.chunk",
+                changed_scope_count.as_object().unwrap(),
+                2,
+                2,
+            )
+            .unwrap_err()
+            .code,
+            "SNAPSHOT_CHUNK_SEQUENCE_INVALID"
+        );
+    }
+
+    #[test]
+    fn legacy_and_new_truncated_cycle_snapshots_remain_rejected() {
+        let mut legacy = valid_artifact(Profile::C15Combined);
+        let data = direct_access_command_snapshot_data_mut(&mut legacy, "E1");
+        data["truncated"] = json!(true);
+        data["scope_complete"] = json!(false);
+        data["cycle_count"] = json!(1);
+        data["truncation_reasons"] = json!(["cycle_detected"]);
+        data.as_object_mut().unwrap().remove("reference_items");
+        data.as_object_mut()
+            .unwrap()
+            .remove("shared_reference_count");
+        assert_eq!(
+            audit_artifact(&legacy).unwrap_err().code,
+            "SNAPSHOT_CHUNK_SCHEMA_INVALID"
+        );
+
+        let mut truncated = valid_artifact(Profile::C15Combined);
+        let data = direct_access_command_snapshot_data_mut(&mut truncated, "E1");
+        data["truncated"] = json!(true);
+        data["scope_complete"] = json!(false);
+        data["truncation_reasons"] = json!(["cycle_detected"]);
+        assert_eq!(
+            audit_artifact(&truncated).unwrap_err().code,
+            "SNAPSHOT_CHUNK_INVALID"
         );
     }
 
@@ -8272,6 +9584,37 @@ mod tests {
         assert_eq!(
             audit_artifact(&invalid_revision).unwrap_err().code,
             "FIXTURE_REVISION_INVALID"
+        );
+    }
+
+    #[test]
+    fn manifest_annotations_must_follow_checkpoint_order() {
+        let mut reordered = valid_artifact(Profile::C13MixerBank);
+        reordered.manifest["annotations"]
+            .as_array_mut()
+            .unwrap()
+            .swap(0, 1);
+        assert_eq!(
+            audit_artifact(&reordered).unwrap_err().code,
+            "ANNOTATION_CHECKPOINT_ORDER_INVALID"
+        );
+
+        let mut missing = valid_artifact(Profile::C13MixerBank);
+        missing.manifest["annotations"]
+            .as_array_mut()
+            .unwrap()
+            .remove(1);
+        assert_eq!(
+            audit_artifact(&missing).unwrap_err().code,
+            "ANNOTATION_CHECKPOINT_MISSING"
+        );
+
+        let mut duplicate = valid_artifact(Profile::C13MixerBank);
+        let first = duplicate.manifest["annotations"][0].clone();
+        duplicate.manifest["annotations"][1] = first;
+        assert_eq!(
+            audit_artifact(&duplicate).unwrap_err().code,
+            "ANNOTATION_CHECKPOINT_DUPLICATE"
         );
     }
 
@@ -8788,6 +10131,7 @@ mod tests {
             })
             .unwrap();
         chunk["message"]["data"]["observation_epoch"] = json!(1);
+        chunk["message"]["data"]["items"][0]["observation_epoch"] = json!(1);
         assert_eq!(
             audit_artifact(&activation_mismatch).unwrap_err().code,
             "DIRECT_ACCESS_OBSERVATION_EPOCH_MISMATCH"
@@ -9078,6 +10422,35 @@ mod tests {
         assert_eq!(
             audit_artifact(&mixer_false).unwrap_err().code,
             "MIXER_BANK_CAPABILITY_INVALID"
+        );
+
+        let mut direct_access_projection = valid_artifact(Profile::C15Combined);
+        direct_access_projection
+            .records
+            .iter_mut()
+            .find(|record| {
+                record["record_type"] == "probe_event"
+                    && record["message"]["event"] == "probe.capabilities"
+            })
+            .unwrap()["message"]["data"]["direct_access"]["projection"] =
+            json!("full_host_graph_v0");
+        assert_eq!(
+            audit_artifact(&direct_access_projection).unwrap_err().code,
+            "DIRECT_ACCESS_CAPABILITY_INVALID"
+        );
+
+        let mut direct_access_depth = valid_artifact(Profile::C15Combined);
+        direct_access_depth
+            .records
+            .iter_mut()
+            .find(|record| {
+                record["record_type"] == "probe_event"
+                    && record["message"]["event"] == "probe.capabilities"
+            })
+            .unwrap()["message"]["data"]["limits"]["direct_access_depth"] = json!(32);
+        assert_eq!(
+            audit_artifact(&direct_access_depth).unwrap_err().code,
+            "CAPABILITY_LIMITS_INVALID"
         );
 
         let mut chunk = valid_artifact(Profile::C13MixerBank);
@@ -9497,13 +10870,51 @@ mod tests {
         let complete = valid_artifact_with_options(Profile::C13MixerBank, false, Some("S0"));
         let report = audit_artifact(&complete).unwrap();
         assert_eq!(report.checkpoint_count, REQUIRED_CHECKPOINTS.len());
+    }
 
-        let navigation = valid_artifact_with_options(
-            Profile::C13MixerBank,
-            false,
-            Some("E8-MB_CORE_ALL-B0-reset"),
+    #[test]
+    fn navigation_reactivation_tracks_the_page_generation() {
+        let checkpoint_id = "E8-MB_CORE_ALL-B0-reset";
+        let mut navigation =
+            valid_artifact_with_options(Profile::C13MixerBank, false, Some(checkpoint_id));
+        set_bank_snapshot_generation(&mut navigation, checkpoint_id, "page_activate", None, 2);
+        set_bank_snapshot_generation(
+            &mut navigation,
+            checkpoint_id,
+            "command_snapshot",
+            Some("MB_CORE_ALL"),
+            2,
         );
         let report = audit_artifact(&navigation).unwrap();
         assert_eq!(report.checkpoint_count, REQUIRED_CHECKPOINTS.len());
+
+        let mut stale_final =
+            valid_artifact_with_options(Profile::C13MixerBank, false, Some(checkpoint_id));
+        set_bank_snapshot_generation(&mut stale_final, checkpoint_id, "page_activate", None, 2);
+        assert_eq!(
+            audit_artifact(&stale_final).unwrap_err().code,
+            "NAVIGATION_GENERATION_INVALID"
+        );
+
+        let mut skipped_generation =
+            valid_artifact_with_options(Profile::C13MixerBank, false, Some(checkpoint_id));
+        set_bank_snapshot_generation(
+            &mut skipped_generation,
+            checkpoint_id,
+            "page_activate",
+            None,
+            3,
+        );
+        set_bank_snapshot_generation(
+            &mut skipped_generation,
+            checkpoint_id,
+            "command_snapshot",
+            Some("MB_CORE_ALL"),
+            3,
+        );
+        assert_eq!(
+            audit_artifact(&skipped_generation).unwrap_err().code,
+            "NAVIGATION_GENERATION_INVALID"
+        );
     }
 }

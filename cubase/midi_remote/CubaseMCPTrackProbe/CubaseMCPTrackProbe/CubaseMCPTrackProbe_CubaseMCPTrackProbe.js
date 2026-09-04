@@ -36,10 +36,13 @@ var MAX_ITEMS_PER_CHUNK = 2
 // initial DirectAccess change burst without making the queue unbounded.
 var MAX_PENDING_FEEDBACK = 512
 var MAX_FEEDBACK_PER_IDLE = 64
+var MAX_DEACTIVATION_FEEDBACK_FLUSH_PASSES =
+    Math.ceil(MAX_PENDING_FEEDBACK / MAX_FEEDBACK_PER_IDLE) + 2
 var MAX_PENDING_BANK_SNAPSHOTS = 32
 var MAX_PENDING_DIRECT_ACCESS_SNAPSHOTS = 16
 var MAX_DIRECT_ACCESS_NODES = 256
-var MAX_DIRECT_ACCESS_DEPTH = 32
+var DIRECT_ACCESS_PROJECTION = 'mix_console_root_children_v1'
+var MAX_DIRECT_ACCESS_DEPTH = 1
 var MAX_DIRECT_ACCESS_CHILDREN = 128
 var MAX_OBSERVATION_EPOCH = 2147483647
 var BANK_SLOT_COUNT = 8
@@ -666,6 +669,33 @@ function flushFeedback(activeDevice) {
     enqueueDroppedFeedbackMarker()
 }
 
+function flushFeedbackBeforeDeactivation(activeDevice) {
+    var passes = 0
+    while (
+        feedbackIsPending() &&
+        passes < MAX_DEACTIVATION_FEEDBACK_FLUSH_PASSES
+    ) {
+        flushFeedback(activeDevice)
+        ++passes
+    }
+}
+
+function isInvalidatedDirectAccessSnapshot(pending) {
+    return pending.reason === 'object_change' ||
+        pending.reason === 'object_will_be_removed' ||
+        pending.reason === 'parameter_change'
+}
+
+function cancelInvalidatedDirectAccessSnapshots() {
+    var retained = []
+    for (var index = 0; index < pendingDirectAccessSnapshots.length; ++index) {
+        if (!isInvalidatedDirectAccessSnapshot(pendingDirectAccessSnapshots[index])) {
+            retained.push(pendingDirectAccessSnapshots[index])
+        }
+    }
+    pendingDirectAccessSnapshots = retained
+}
+
 function feedbackIsPending() {
     return pendingFeedback.length > 0 || pendingDroppedFeedback.total > 0
 }
@@ -804,13 +834,13 @@ function makeDirectAccess() {
 
     candidate.mOnObjectChange = function (activeDevice, activeMapping, objectId) {
         recordDirectAccessChange('object_change', objectId, null)
-        if (!directAccessUpdateInProgress) {
+        if (pageIsReady && !directAccessUpdateInProgress) {
             scheduleDirectAccessSnapshotOnce('object_change')
         }
     }
     candidate.mOnObjectWillBeRemoved = function (activeDevice, activeMapping, objectId) {
         recordDirectAccessChange('object_will_be_removed', objectId, null)
-        if (!directAccessUpdateInProgress) {
+        if (pageIsReady && !directAccessUpdateInProgress) {
             scheduleDirectAccessSnapshotOnce('object_will_be_removed')
         }
     }
@@ -821,7 +851,7 @@ function makeDirectAccess() {
         parameterTag
     ) {
         recordDirectAccessChange('parameter_change', objectId, parameterTag)
-        if (!directAccessUpdateInProgress) {
+        if (pageIsReady && !directAccessUpdateInProgress) {
             scheduleDirectAccessSnapshotOnce('parameter_change')
         }
     }
@@ -1022,9 +1052,19 @@ function flushOneDirectAccessSnapshot(activeDevice, activeMapping) {
         result.truncated,
         {
             base_object_id: result.base_object_id,
+            projection: result.projection,
+            scope_depth: result.scope_depth,
+            scope_complete: result.scope_complete,
+            host_graph_complete: result.host_graph_complete,
+            root_child_count: result.root_child_count,
+            authoritative_for_track_enumeration:
+                result.authoritative_for_track_enumeration,
             observation_epoch: result.observation_epoch,
             observation_epoch_status: result.observation_epoch_status,
+            observation_items: result.observation_items,
+            reference_items: result.reference_items,
             cycle_count: result.cycle_count,
+            shared_reference_count: result.shared_reference_count,
             error_count: result.error_count,
             truncation_reasons: result.truncation_reasons
         }
@@ -1035,10 +1075,19 @@ function collectDirectAccess(activeMapping) {
     var snapshotEpoch = observationEpoch
     var result = {
         base_object_id: null,
+        projection: DIRECT_ACCESS_PROJECTION,
+        scope_depth: MAX_DIRECT_ACCESS_DEPTH,
+        scope_complete: false,
+        host_graph_complete: false,
+        root_child_count: null,
+        authoritative_for_track_enumeration: false,
         items: [],
         observation_epoch: snapshotEpoch,
         observation_epoch_status: 'snapshot_observed',
+        observation_items: 0,
+        reference_items: 0,
         cycle_count: 0,
+        shared_reference_count: 0,
         error_count: 0,
         truncated: false,
         truncation_reasons: []
@@ -1062,96 +1111,143 @@ function collectDirectAccess(activeMapping) {
     }
 
     result.base_object_id = baseObjectId
-    var stack = [{ object_id: baseObjectId, parent_id: null, depth: 0, child_index: null }]
+    var rootEntry = {
+        object_id: baseObjectId,
+        parent_id: null,
+        depth: 0,
+        child_index: null
+    }
     var visited = {}
+    var rootKey = '$' + String(baseObjectId)
+    visited[rootKey] = 0
+    result.observation_items = 1
 
-    while (stack.length > 0 && result.items.length < MAX_DIRECT_ACCESS_NODES) {
-        var entry = stack.pop()
-        var key = '$' + String(entry.object_id)
-        if (visited[key]) {
-            ++result.cycle_count
+    var rootItem = readDirectAccessObject(activeMapping, rootEntry, snapshotEpoch)
+    rootItem.children_expanded = true
+    result.error_count += rootItem.metadata_error_count
+    result.items.push(rootItem)
+
+    var rootChildCount = null
+    try {
+        rootChildCount = directAccess.getNumberOfChildObjects(
+            activeMapping,
+            baseObjectId
+        )
+    } catch (error) {
+        ++result.error_count
+        rootItem.child_enumeration_error = 'get_number_of_child_objects_failed'
+        result.truncated = true
+        addUniqueReason(result.truncation_reasons, 'child_count_failed')
+        return result
+    }
+
+    if (!validNonnegativeInteger(rootChildCount)) {
+        ++result.error_count
+        rootItem.child_enumeration_error = 'invalid_child_count'
+        result.truncated = true
+        addUniqueReason(result.truncation_reasons, 'invalid_child_count')
+        return result
+    }
+
+    rootItem.child_count = rootChildCount
+    result.root_child_count = rootChildCount
+    var visitedRootChildCount = rootChildCount
+    if (visitedRootChildCount > MAX_DIRECT_ACCESS_CHILDREN) {
+        visitedRootChildCount = MAX_DIRECT_ACCESS_CHILDREN
+        result.truncated = true
+        addUniqueReason(result.truncation_reasons, 'child_count_limit')
+    }
+
+    for (var childIndex = 0; childIndex < visitedRootChildCount; ++childIndex) {
+        if (result.items.length >= MAX_DIRECT_ACCESS_NODES) {
             result.truncated = true
-            addUniqueReason(result.truncation_reasons, 'cycle_detected')
-            continue
-        }
-        visited[key] = true
-
-        var item = readDirectAccessObject(activeMapping, entry, snapshotEpoch)
-        result.error_count += item.metadata_error_count
-        result.items.push(item)
-
-        if (entry.depth >= MAX_DIRECT_ACCESS_DEPTH) {
-            result.truncated = true
-            addUniqueReason(result.truncation_reasons, 'depth_limit')
-            continue
+            addUniqueReason(result.truncation_reasons, 'node_limit')
+            break
         }
 
-        var childCount = 0
+        var childObjectId = null
         try {
-            childCount = directAccess.getNumberOfChildObjects(
+            childObjectId = directAccess.getChildObjectID(
                 activeMapping,
-                entry.object_id
+                baseObjectId,
+                childIndex
             )
         } catch (error) {
             ++result.error_count
-            item.child_count = null
+            result.truncated = true
+            addUniqueReason(result.truncation_reasons, 'child_object_id_failed')
+            continue
+        }
+
+        if (!validObjectId(childObjectId)) {
+            ++result.error_count
+            result.truncated = true
+            addUniqueReason(result.truncation_reasons, 'invalid_child_object_id')
+            continue
+        }
+
+        var entry = {
+            object_id: childObjectId,
+            parent_id: baseObjectId,
+            depth: 1,
+            child_index: childIndex
+        }
+        var key = '$' + String(childObjectId)
+        if (Object.prototype.hasOwnProperty.call(visited, key)) {
+            var referenceKind = 'shared_reference'
+            if (childObjectId === baseObjectId) {
+                referenceKind = 'ancestor_cycle'
+                ++result.cycle_count
+            } else {
+                ++result.shared_reference_count
+            }
+            ++result.reference_items
+            result.items.push({
+                record_kind: 'object_reference',
+                observation_epoch: snapshotEpoch,
+                observation_epoch_status: 'snapshot_observed',
+                reference_kind: referenceKind,
+                object_id: childObjectId,
+                parent_id: baseObjectId,
+                depth: 1,
+                child_index: childIndex,
+                target_observation_index: visited[key]
+            })
+            continue
+        }
+
+        visited[key] = result.observation_items
+        ++result.observation_items
+        var item = readDirectAccessObject(activeMapping, entry, snapshotEpoch)
+        item.children_expanded = false
+        result.error_count += item.metadata_error_count
+        result.items.push(item)
+
+        var childCount = null
+        try {
+            childCount = directAccess.getNumberOfChildObjects(
+                activeMapping,
+                childObjectId
+            )
+        } catch (error) {
+            ++result.error_count
             item.child_enumeration_error = 'get_number_of_child_objects_failed'
             result.truncated = true
             addUniqueReason(result.truncation_reasons, 'child_count_failed')
             continue
         }
-
         if (!validNonnegativeInteger(childCount)) {
             ++result.error_count
-            item.child_count = null
             item.child_enumeration_error = 'invalid_child_count'
             result.truncated = true
             addUniqueReason(result.truncation_reasons, 'invalid_child_count')
             continue
         }
-
         item.child_count = childCount
-        var visitedChildCount = childCount
-        if (visitedChildCount > MAX_DIRECT_ACCESS_CHILDREN) {
-            visitedChildCount = MAX_DIRECT_ACCESS_CHILDREN
-            result.truncated = true
-            addUniqueReason(result.truncation_reasons, 'child_count_limit')
-        }
-
-        for (var childIndex = visitedChildCount - 1; childIndex >= 0; --childIndex) {
-            var childObjectId = null
-            try {
-                childObjectId = directAccess.getChildObjectID(
-                    activeMapping,
-                    entry.object_id,
-                    childIndex
-                )
-            } catch (error) {
-                ++result.error_count
-                result.truncated = true
-                addUniqueReason(result.truncation_reasons, 'child_object_id_failed')
-                continue
-            }
-
-            if (!validObjectId(childObjectId)) {
-                ++result.error_count
-                result.truncated = true
-                addUniqueReason(result.truncation_reasons, 'invalid_child_object_id')
-                continue
-            }
-            stack.push({
-                object_id: childObjectId,
-                parent_id: entry.object_id,
-                depth: entry.depth + 1,
-                child_index: childIndex
-            })
-        }
     }
 
-    if (stack.length > 0) {
-        result.truncated = true
-        addUniqueReason(result.truncation_reasons, 'node_limit')
-    }
+    result.scope_complete = !result.truncated
+
     return result
 }
 
@@ -1217,6 +1313,7 @@ function readDirectAccessObject(activeMapping, entry, snapshotEpoch) {
             errors
         ),
         child_count: null,
+        children_expanded: false,
         child_enumeration_error: null,
         metadata_error_count: 0,
         metadata_errors: [],
@@ -1586,6 +1683,9 @@ function capabilityData() {
             supported: directAccessCapabilities.supported,
             active: directAccessCapabilities.active,
             activation_error: directAccessActivationError,
+            projection: DIRECT_ACCESS_PROJECTION,
+            scope_depth: MAX_DIRECT_ACCESS_DEPTH,
+            authoritative_for_track_enumeration: false,
             get_object_unique_name_v1_2:
                 directAccessCapabilities.get_object_unique_name_v1_2,
             get_object_unique_id_string_v1_2:
@@ -1642,6 +1742,15 @@ function deactivatePage(activeDevice, activeMapping) {
     }
 
     deactivateDirectAccess(activeDevice, activeMapping)
+    // Cubase can synchronously enqueue more than one idle batch while a
+    // project-activation dialog blocks mOnIdle. Preserve that evidence before
+    // ready(false); callbacks emitted after the inactive boundary are invalid.
+    flushFeedbackBeforeDeactivation(activeDevice)
+    // Coalesced change snapshots describe the mapping that is now being torn
+    // down. Their underlying callbacks were drained above and the next mapping
+    // emits a complete page_activate snapshot. Command and activation work is
+    // deliberately retained so the fail-closed discard check still catches it.
+    cancelInvalidatedDirectAccessSnapshots()
     var initialSnapshotsComplete = pageIsReady
     var discardedItems =
         pendingFeedback.length +
@@ -1689,7 +1798,9 @@ function sendChunkedEvent(
     var snapshotId = nextSnapshotId()
     var chunkExtra = {}
     copyOwnProperties(chunkExtra, extra)
-    chunkExtra.observation_items = items.length
+    if (!Object.prototype.hasOwnProperty.call(chunkExtra, 'observation_items')) {
+        chunkExtra.observation_items = items.length
+    }
     var expansion = expandHostIdsForWire(
         snapshotId,
         eventName,

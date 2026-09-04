@@ -54,6 +54,13 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo fmt --all -- --check
 
+      - name: Check evidence scripts
+        if: runner.os == 'Linux'
+        run: |
+          bash -n scripts/check-input-guard-calibration.sh
+          bash -n scripts/check-track-probe-evidence.sh
+          node tests/track_probe_evidence_checker.test.js
+
       - name: Run Clippy
         if: runner.os == 'Linux'
         run: cargo clippy --all-targets --locked -- -D warnings
@@ -69,3 +76,7 @@ jobs:
         run: |
           node tests/midi_remote_script.test.js
           node tests/track_probe_script.test.js
+
+      - name: Test macOS input-guard evidence checker
+        if: runner.os == 'macOS'
+        run: node tests/input_guard_calibration_checker.test.js

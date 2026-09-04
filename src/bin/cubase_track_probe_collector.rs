@@ -5182,6 +5182,56 @@ mod tests {
         })
     }
 
+    fn direct_access_graph_chunk_data(
+        snapshot_id: &str,
+        chunk_index: usize,
+        truncated: bool,
+    ) -> Value {
+        let items = if chunk_index == 0 {
+            vec![json!({
+                "record_kind": "observation",
+                "observation_epoch": 1,
+                "observation_epoch_status": "snapshot_observed",
+                "object_id": 1,
+                "parent_id": null,
+                "depth": 0,
+                "child_index": null,
+                "child_count": 1
+            })]
+        } else {
+            vec![json!({
+                "record_kind": "object_reference",
+                "observation_epoch": 1,
+                "observation_epoch_status": "snapshot_observed",
+                "object_id": 1,
+                "parent_id": 1,
+                "depth": 1,
+                "child_index": 0,
+                "target_observation_index": 0,
+                "reference_kind": "ancestor_cycle"
+            })]
+        };
+        json!({
+            "snapshot_id": snapshot_id,
+            "stream": "direct_access_snapshot",
+            "reason": "command_snapshot",
+            "chunk_index": chunk_index,
+            "chunk_count": 2,
+            "total_items": 2,
+            "items": items,
+            "snapshot_complete": chunk_index == 1,
+            "truncated": truncated,
+            "overflow_safe": true,
+            "truncation_reasons": if truncated { json!(["node_limit"]) } else { json!([]) },
+            "base_object_id": 1,
+            "observation_items": 1,
+            "reference_items": 1,
+            "cycle_count": 1,
+            "shared_reference_count": 0,
+            "error_count": 0
+        })
+    }
+
     #[test]
     fn codec_round_trips_unicode_probe_event_with_unique_header() {
         let value = incoming(
@@ -6487,6 +6537,61 @@ mod tests {
         assert_eq!(summary["completed_chunk_streams"], 2);
         assert_eq!(summary["completed_snapshot_streams"], 1);
         assert_eq!(summary["completed_feedback_streams"], 1);
+    }
+
+    #[test]
+    fn chunk_tracker_accepts_direct_access_graph_references_and_rejects_truncation() {
+        let base = Instant::now();
+        let mut tracker = ProtocolTracker::default();
+        make_source_ready(&mut tracker, "source-a");
+        select_source(&mut tracker, "source-a", base);
+        let request = request(
+            "direct-snapshot",
+            Some("source-a"),
+            "probe.direct_access.snapshot",
+            json!({}),
+        );
+        tracker
+            .register_request(&request, base, Duration::from_secs(1))
+            .unwrap();
+        assert!(
+            tracker
+                .observe_reply("source-a", "direct-snapshot", MessageKind::Response)
+                .is_empty()
+        );
+        assert_eq!(tracker.expected_followups.len(), 1);
+        assert!(
+            tracker
+                .observe_chunk_event(
+                    "source-a",
+                    "probe.direct_access.chunk",
+                    &direct_access_graph_chunk_data("direct-graph", 0, false),
+                )
+                .is_empty()
+        );
+        assert!(
+            tracker
+                .observe_chunk_event(
+                    "source-a",
+                    "probe.direct_access.chunk",
+                    &direct_access_graph_chunk_data("direct-graph", 1, false),
+                )
+                .is_empty()
+        );
+        assert!(tracker.is_quiescent());
+        assert_eq!(tracker.completed_snapshot_streams, 1);
+
+        let mut truncated = ProtocolTracker::default();
+        assert!(
+            truncated
+                .observe_chunk_event(
+                    "source-a",
+                    "probe.direct_access.chunk",
+                    &direct_access_graph_chunk_data("direct-truncated", 0, true),
+                )
+                .iter()
+                .any(|fault| fault.code == "SOURCE_SNAPSHOT_TRUNCATED")
+        );
     }
 
     #[test]

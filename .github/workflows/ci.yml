@@ -67,7 +67,9 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Run Rust tests
-        run: cargo test --all-targets --locked
+        run: |
+          node --version
+          cargo test --all-targets --locked
 
       - name: Build release binaries
         run: cargo build --release --locked
@@ -77,6 +79,9 @@ jobs:
         run: |
           node tests/midi_remote_script.test.js
           node tests/track_probe_script.test.js
+          node tests/io_profile.test.js
+          node tests/io_probe_script.test.js
+          node tests/io_probe_audit.test.js
 
       - name: Test macOS input-guard evidence checker
         if: runner.os == 'macOS'

@@ -392,6 +392,8 @@ run開始前に、実際に注入するexactly 63 UI callを順序付き・重�
 
 counter取得が`2000 ms`以内に完了しない、sample中のaggregate変化を拒否できない、通常keyまたはmouse buttonが押下されたまま、controlを再現できない、またはautomation自身が15 fieldのいずれかを増加させる環境ではguardを利用可能と推測せずprimary runを開始しません。`mouse_moved`は結果へ記録し、正常に完了したarm / check sample間では単独のaction interferenceに使いませんが、sample中のaggregate raceからは除外しません。CoreGraphicsはkey autorepeatをcountしないため、押下中keyを拒否するpreconditionを省略しません。volume / brightness等の一部special hardware keyやsoftware remote control、通知、Cubase自身によるfocus / window変更はconsequential counterだけでは検出できません。input guardは前後のsemantic target / screenshot / Probe差分、tool target binding、action-specific postconditionを置き換えず、すべてを満たした場合だけannotationをtrueにします。guard JSONL、guard binaryのSHA-256、exact-context calibration結果、ui-action-inventory、operator tool traceはrepository外のlocal operator recordとして保持し、raw Probe JSONLやmanifest v1へ混入させません。audit manifest v1とauditorはguard artifactを入力に取らないため、redacted audit report v2だけからguard使用を証明したと主張しません。
 
+校正中の失敗は[復旧手順](input-guard-calibration-recovery.md)に従い、影響するプロセス単位で扱います。完成済みbundleの再利用は同じ実行contextと記録の完全性を確認した場合に限り、未完了actionの接合やattestationの後付けを許可しません。
+
 各checkpointでは次の順序を固定します。
 
 1. checkpointを開始する。
@@ -463,6 +465,8 @@ script reloadとCubase再起動はbaseline作成へ混ぜず、C1を開いた独
 R1/R2の`reconnect_deadline_ms`は既定`30000`とし、action markerから新sessionのreadyと再discover完了までへ適用します。final snapshotはactionから5000 ms以上かつready / discovery後に行い、ready / discovery完了から`10000 ms`以内に完了させます。30秒のreconnect期限へ追加観測時間を混ぜず、期限内にready / discoveryを確認できなければ、そのphaseを`INCONCLUSIVE_RECONNECT_TIMEOUT`として停止します。R1/R2内でpre-action snapshot commandを重複実行せず、直前checkpointの監査済みfinal snapshotをpre-stateとして参照します。R1/R2は未保存の通常projectがないことを再確認してから行います。IDの維持・変更は観測値であり、このfixtureのpass条件にはしません。
 
 ## Case O1: Input / Output / VCA（任意）
+
+Issue #3の調査scopeにはInput / Outputが含まれます。以下のv1制約によるskipは、その調査の完了を意味しません。別profileで得た観測、または明示的に合意したscope変更と後続Issueへの追跡がない限り、primary runの成功だけでIssue #3をcloseしません。
 
 このcaseは将来の別profile用手順であり、audit manifest v1とprimary Track Probeでは実施できません。primary Probeは`MB_OPTIONAL_*` config自体を作成しません。DirectAccessの`mix_console_root_children_v1`はbase object直下にInput / Output / VCA等が現れるかを観測し得ますが、depth 1より下を探索せず、固定fixture allowlist外のtitle、unique name、host ID、自由形式type / error文字列はProbe内でframe生成前にredactし、raw JSONLへ収集しません。安全なroot-child位置、explicit repeat edge、boolean / numeric値、固定type categoryとredaction件数だけをscope観測へ残します。v1 manifestは`optional_o1.status = "skipped"`と固定理由`not_separately_authorized`だけを受け付け、O1 projectを作成せず、以下の手順1以降を実行しません。
 

@@ -676,6 +676,86 @@ try {
     })
     assert.equal(Object.hasOwn(report.controls, 'sample_guard_rejection'), false)
 
+    // An unrelated incomplete process does not invalidate an independent,
+    // complete process from the same source directory. These are synthetic
+    // records only; acceptance still requires all nine complete profiles.
+    const firstSource = path.join(root, 'source-with-later-failure')
+    const secondSource = path.join(root, 'independent-source')
+    buildFixture(firstSource, guardSha)
+    buildFixture(secondSource, guardSha)
+    const failedMoveGuard = path.join(firstSource, `${prefix}-move.jsonl`)
+    const failedMoveTrace = path.join(firstSource, `${prefix}-move-trace.jsonl`)
+    writeJsonl(failedMoveGuard, readJsonl(failedMoveGuard).slice(0, 2))
+    writeJsonl(failedMoveTrace, readJsonl(failedMoveTrace).slice(0, 1))
+    fs.writeFileSync(path.join(firstSource, 'failed-attempt.txt'), 'synthetic interrupted move; do not adopt\n')
+
+    const sourceBytes = new Map()
+    for (const source of [firstSource, secondSource]) {
+        for (const subdirectory of ['', 'states', 'screenshots']) {
+            const directory = path.join(source, subdirectory)
+            for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+                if (entry.isFile()) {
+                    const file = path.join(directory, entry.name)
+                    sourceBytes.set(file, fs.readFileSync(file))
+                }
+            }
+        }
+    }
+
+    const reusedFixture = path.join(root, 'complete-processes-from-independent-sources')
+    fs.mkdirSync(reusedFixture)
+    fs.mkdirSync(path.join(reusedFixture, 'states'))
+    fs.mkdirSync(path.join(reusedFixture, 'screenshots'))
+    const selectedBytes = new Map()
+    for (const processName of Object.keys(report.guard_sessions)) {
+        const source = processName === 'automation' ? firstSource : secondSource
+        const traceName = `${prefix}-${processName}-trace.jsonl`
+        const artifacts = [
+            `${prefix}-${processName}.jsonl`,
+            `${prefix}-${processName}.stderr`,
+            traceName
+        ]
+        for (const record of readJsonl(path.join(source, traceName))) {
+            if (record.record_type !== 'action') continue
+            for (const capture of [record.pre_state, record.post_state]) {
+                artifacts.push(capture.state_path, capture.screenshot_path)
+            }
+        }
+        for (const relativeFile of artifacts) {
+            const sourceFile = path.join(source, relativeFile)
+            const destinationFile = path.join(reusedFixture, relativeFile)
+            fs.copyFileSync(sourceFile, destinationFile, fs.constants.COPYFILE_EXCL)
+            selectedBytes.set(destinationFile, sourceBytes.get(sourceFile))
+        }
+    }
+
+    const reused = runChecker(reusedFixture, guardSha)
+    assert.equal(reused.status, 0, `complete reused processes rejected:\nstdout: ${reused.stdout}\nstderr: ${reused.stderr}`)
+    const reusedReport = JSON.parse(reused.stdout)
+    assert.equal(reusedReport.status, 'valid')
+    assert.equal(reusedReport.fresh_guard_identity_count, 9)
+    assert.deepEqual(reusedReport.guard_sessions, report.guard_sessions)
+    assert.equal(selectedBytes.size, 87, 'copy all 27 process files and all 60 capture artifacts')
+    assert.equal(fs.existsSync(path.join(reusedFixture, 'failed-attempt.txt')), false)
+
+    expectRejected(reusedFixture, root, guardSha, 'incomplete-reused-process', /trace timestamps must .* strictly increase/, (fixture) => {
+        fs.copyFileSync(failedMoveGuard, path.join(fixture, `${prefix}-move.jsonl`))
+        fs.copyFileSync(failedMoveTrace, path.join(fixture, `${prefix}-move-trace.jsonl`))
+    })
+
+    expectRejected(reusedFixture, root, guardSha, 'retry-within-reused-process', /move-only trace invalid/, (fixture) => {
+        mutateJsonl(path.join(fixture, `${prefix}-move-trace.jsonl`), (records) => {
+            records[1].no_retry_within_process = false
+        })
+    })
+
+    for (const [file, bytes] of sourceBytes) {
+        assert.deepEqual(fs.readFileSync(file), bytes, `source artifact changed: ${file}`)
+    }
+    for (const [file, bytes] of selectedBytes) {
+        assert.deepEqual(fs.readFileSync(file), bytes, `selected artifact was rewritten: ${file}`)
+    }
+
     const mouseHeldFixture = path.join(root, 'valid-mouse-held')
     cloneFixture(validFixture, mouseHeldFixture)
     mutateJsonl(path.join(mouseHeldFixture, `${prefix}-held-state-rejection.jsonl`), (records) => {

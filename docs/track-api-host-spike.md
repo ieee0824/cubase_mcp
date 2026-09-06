@@ -4,6 +4,8 @@
 
 文書状態: `PENDING_RUNTIME`
 
+校正の再試行単位と完了済み記録の扱いは[入力ガード校正の復旧手順](input-guard-calibration-recovery.md)を参照してください。校正の部分結果、offline test、CI成功は、この文書のruntime観測を完了させません。Issue #3に含まれるInput / Outputも、primary profileでのO1 skipとは区別して未完了として追跡します。
+
 このrevisionではread-onlyの静的preflightと、実機観測用Probe / collector / fail-closed auditorのoffline実装が完了しています。2026-08-28のCubase 15 formal attemptはE1で旧full-graph traversalがrepeat edgeを`cycle_detected` / `truncated`として停止したためinvalidであり、runtime結果へ採用しません。この失敗を新しいroot-child projectionで遡及的に成功へ変更せず、fresh collector、fresh run ID、修正版Probeで再実施します。したがって、観測欄の`PENDING`は成功、対応、非対応のいずれも意味しません。runtime表、比較、最終推奨、完了checklistが埋まるまでIssue #3をcloseしません。
 
 ## 結果class

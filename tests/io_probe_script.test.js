@@ -78,6 +78,52 @@ test('only dedicated bank navigation is exposed; duplicates and concurrent calls
     assert.equal(h.messages.at(-1).message.data.reason, 'command_next')
 })
 
+test('navigation drains both banks old feedback before its success response', () => {
+    for (const action of ['reset', 'next', 'prev']) {
+        const h = harness()
+        h.idle()
+        const begin = h.messages.length
+        h.zones.forEach(zone => zone.slots[0].mOnTitleChange(h.device, h.mapping, canary))
+        const id = h.call('probe.bank.' + action, { config_id: 'IO_INPUT_ALL' })
+        const beforeIdle = h.messages.slice(begin)
+        assert.deepEqual(beforeIdle.map(envelope => envelope.message.event || envelope.message.id),
+            ['probe.io.feedback', 'probe.io.feedback', id])
+        assert.deepEqual(beforeIdle.slice(0, 2).map(envelope => envelope.message.data.generation), [1, 1])
+        assert.equal(beforeIdle.at(-1).message.type, 'response')
+        h.idle()
+        const afterResponse = h.messages.slice(begin + beforeIdle.length)
+        assert.equal(afterResponse.filter(envelope => envelope.message.event === 'probe.io.feedback').length, 8)
+        assert.ok(afterResponse.every(envelope => envelope.message.data.generation === 2))
+        assert.deepEqual(h.messages.map(envelope => envelope.source_seq), h.messages.map((_, index) => index + 1))
+        assert.ok(!JSON.stringify(h.messages).includes(canary))
+    }
+})
+
+test('feedback reentering the pre-navigation drain returns BUSY without moving the bank', () => {
+    let reenter = false
+    const h = harness({ onFrame(frame) {
+        if (reenter && wire.decode(frame, 2048).message.event === 'probe.io.feedback') {
+            reenter = false
+            h.zones[0].slots[1].mOnTitleChange(h.device, h.mapping, canary)
+        }
+    } })
+    h.idle()
+    h.zones[0].slots[0].mOnTitleChange(h.device, h.mapping, canary)
+    reenter = true
+    h.call('probe.bank.next', { config_id: 'IO_INPUT_ALL' })
+    assert.equal(h.messages.at(-1).message.type, 'error')
+    assert.equal(h.messages.at(-1).message.error.code, 'BUSY')
+    assert.deepEqual(h.navigations, [])
+    h.idle()
+    assert.equal(h.messages.at(-1).message.data.generation, 1)
+    assert.ok(!h.messages.some(envelope => envelope.message.event === 'probe.overflow'))
+    // A clean later request can proceed; the rejected request consumed no generation.
+    h.call('probe.bank.next', { config_id: 'IO_INPUT_ALL' })
+    h.idle()
+    assert.deepEqual(h.navigations, [['IO_INPUT_ALL', 'Next']])
+    assert.equal(h.messages.at(-1).message.data.generation, 2)
+})
+
 test('callback overflow and pending deactivation fail closed without host error text', () => {
     const h = harness()
     h.zones[0].slots[0].mOnTitleChange(h.device, h.mapping, canary.repeat(300))

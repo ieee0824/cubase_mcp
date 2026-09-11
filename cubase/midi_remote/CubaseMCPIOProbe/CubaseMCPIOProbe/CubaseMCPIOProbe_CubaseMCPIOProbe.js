@@ -221,7 +221,17 @@ function handle(request) {
     if (fatal !== null) { errorResponse(id, 'INTERNAL_ERROR'); return }
     if (!ready || pending !== null) { errorResponse(id, 'BUSY'); return }
     var action = actions[method]
-    if (action) core.navigate(request.params.config_id, action)
+    if (action) {
+        // Keep the success response as the generation boundary on the wire.
+        // Feedback queued before navigation still belongs to the old bank.
+        flushFeedback()
+        if (fatal !== null) { errorResponse(id, 'INTERNAL_ERROR'); return }
+        if (!active) { errorResponse(id, 'NOT_CONNECTED'); return }
+        // Sending may reenter host callbacks. Do not advance the bank while
+        // another old-generation batch remains; one bounded drain is enough.
+        if (!ready || feedback.length !== 0) { errorResponse(id, 'BUSY'); return }
+        core.navigate(request.params.config_id, action)
+    }
     var result = { config_id: request.params.config_id, scheduled: true }
     if (action) result.action = action
     response(id, result)

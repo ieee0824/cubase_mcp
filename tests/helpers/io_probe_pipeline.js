@@ -7,7 +7,7 @@ const fs = require('node:fs')
 const crypto = require('node:crypto')
 const readline = require('node:readline')
 const path = require('node:path')
-const { harness, canary, directory } = require('./io_probe_harness')
+const { harness, wire, canary, directory } = require('./io_probe_harness')
 
 if (process.argv[2] === 'driver') {
     const h = harness({ oldApi: process.argv[3] === 'old', autoActivate: false,
@@ -25,6 +25,15 @@ if (process.argv[2] === 'driver') {
         } else {
             assert.equal(started, true)
             assert.ok(Array.isArray(command.frame))
+            const request = wire.decode(command.frame, 4096)
+            assert.ok(request)
+            if (request.message.method === 'probe.bank.next') {
+                assert.equal(request.message.params.config_id, 'IO_INPUT_ALL')
+                // A host callback may arrive after the preceding idle but before
+                // navigation. Keep it queued: only the real driver may emit it.
+                h.zones[0].slots[1].mOnTitleChange(h.device, h.mapping,
+                    canary + '-queued-before-navigation')
+            }
             h.input.mOnSysex(h.device, command.frame)
         }
         h.idle()

@@ -7058,6 +7058,57 @@ mod tests {
             );
             let raw = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
             assert!(!raw.contains("PRIVATE_BUS_SECRET"));
+            let records: Vec<Value> = raw
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let queued_feedback = records
+                .iter()
+                .find(|record| {
+                    record["message"]["event"] == "probe.io.feedback"
+                        && record["message"]["data"]["generation"] == 1
+                        && record["message"]["data"]["observation_id"] == 2
+                })
+                .expect("the pre-navigation host callback must not be discarded");
+            let navigation_response = records
+                .iter()
+                .find(|record| record["message"]["result"]["action"] == "next")
+                .expect("navigation must complete through the real driver");
+            assert_eq!(queued_feedback["message"]["data"]["item"]["slot_index"], 1);
+            assert_eq!(
+                queued_feedback["message"]["data"]["item"]["title_alias"],
+                "title-2"
+            );
+            assert!(
+                queued_feedback["source_seq"].as_u64().unwrap()
+                    < navigation_response["source_seq"].as_u64().unwrap(),
+                "generation-1 feedback must precede the generation-2 navigation response (old_api={old_api})"
+            );
+            let new_feedback: Vec<_> = records
+                .iter()
+                .filter(|record| {
+                    record["message"]["event"] == "probe.io.feedback"
+                        && record["message"]["data"]["generation"] == 2
+                })
+                .collect();
+            assert_eq!(new_feedback.len(), 8);
+            let first_navigation_chunk = records
+                .iter()
+                .find(|record| {
+                    record["message"]["event"] == "probe.bank.chunk"
+                        && record["message"]["data"]["reason"] == "command_next"
+                })
+                .unwrap();
+            for feedback in new_feedback {
+                assert!(
+                    navigation_response["source_seq"].as_u64().unwrap()
+                        < feedback["source_seq"].as_u64().unwrap()
+                );
+                assert!(
+                    feedback["source_seq"].as_u64().unwrap()
+                        < first_navigation_chunk["source_seq"].as_u64().unwrap()
+                );
+            }
             let mut auditor = TestChild(
                 Command::new("node")
                     .arg(&helper)
@@ -7096,6 +7147,12 @@ mod tests {
             assert_eq!(result["counts"]["snapshots"], 3);
             assert_eq!(result["runtime_acceptance"], "pending_ui_review");
             assert_eq!(result["complete"], false);
+            assert_eq!(result["snapshots"][2]["generation"], 2);
+            for item in result["snapshots"][2]["items"].as_array().unwrap() {
+                assert_eq!(item["title_observed"], true);
+                assert_eq!(item["title_state"], "nonempty");
+                assert_eq!(item["title_alias"], "title-1");
+            }
             let item = &result["snapshots"][0]["items"][1];
             assert_eq!(item["title_state"], "unobserved");
             assert_eq!(item["title_alias"], Value::Null);

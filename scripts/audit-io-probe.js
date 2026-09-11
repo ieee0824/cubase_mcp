@@ -10,6 +10,7 @@ const MAX_RECORDS = 20000
 const MAX_RAW_BYTES = 16 * 1024 * 1024
 const ITEM_KEYS = ['slot_index', 'title_observed', 'title_state', 'title_alias',
     'host_id_supported', 'host_id_status', 'host_id_alias']
+const TITLE_KEYS = ['title_observed', 'title_state', 'title_alias']
 const REASONS = { 'probe.bank.snapshot': 'command_snapshot', 'probe.bank.reset': 'command_reset',
     'probe.bank.next': 'command_next', 'probe.bank.prev': 'command_prev' }
 
@@ -130,6 +131,7 @@ function audit(records, manifest) {
     const unrecordedSends = new Set(); let nextRequest = 0
     const seenRequests = new Set(); const seenSnapshots = new Set(); const checkpoints = new Set()
     const generations = { IO_INPUT_ALL: 1, IO_OUTPUT_ALL: 1 }
+    const titles = { IO_INPUT_ALL: Array(8).fill(null), IO_OUTPUT_ALL: Array(8).fill(null) }
     const snapshots = []; let source = null; let sourceSeq = 0; let lifecycle = 0
     let active = null; let pending = null; let openSnapshot = null; let selected = false
     let monotonic = -1; let feedbackCount = 0; let observation = 0; let events = 0; let responses = 0
@@ -152,7 +154,6 @@ function audit(records, manifest) {
             check(selected && request.target_instance_id === source)
             if (Object.hasOwn(REASONS, message.method)) {
                 keys(message.params, ['config_id']); config(message.params.config_id)
-                if (message.method !== 'probe.bank.snapshot') generations[message.params.config_id]++
             } else keys(message.params, [])
         }
         check(entry.sent.send_completed_monotonic_timestamp_ms >= active.start)
@@ -256,7 +257,14 @@ function audit(records, manifest) {
                 const action = pending.method.slice('probe.bank.'.length)
                 keys(result, action === 'snapshot' ? ['profile', 'config_id', 'scheduled'] : ['profile', 'config_id', 'scheduled', 'action'])
                 check(result.config_id === pending.config && result.scheduled === true)
-                if (action !== 'snapshot') check(result.action === action)
+                if (action !== 'snapshot') {
+                    check(result.action === action)
+                    // The driver flushes queued old-generation feedback before
+                    // navigating. Only a validated success marks the boundary;
+                    // command/send evidence may be emitted after the response.
+                    generations[pending.config]++
+                    titles[pending.config].fill(null)
+                }
             }
             pending.replied = true
             if (pending.method === 'probe.capabilities.get') finishPending()
@@ -283,8 +291,12 @@ function audit(records, manifest) {
             keys(data, ['profile', 'config_id', 'activation_epoch', 'generation', 'observation_id', 'item'])
             config(data.config_id); check(data.activation_epoch === 1 && data.generation === generations[data.config_id])
             integer(data.observation_id, 1); check(data.observation_id === observation + 1); observation = data.observation_id
-            validateItem(data.item, data.config_id, false)
+            const item = validateItem(data.item, data.config_id, false)
             check(startupCapabilities && data.item.host_id_supported === startupCapabilities.configs[CONFIGS.indexOf(data.config_id)].host_id_supported[data.item.slot_index])
+            // A title callback observes a string (possibly empty), but does not
+            // call the host-ID getter. IDs are sampled only for snapshots.
+            check(item.title_observed && item.host_id_status === (item.host_id_supported ? 'unobserved' : 'unsupported'))
+            titles[data.config_id][item.slot_index] = item
             feedbackCount++; continue
         }
         check(message.event === 'probe.bank.chunk', 'FORBIDDEN_EVENT')
@@ -308,6 +320,10 @@ function audit(records, manifest) {
         data.items.forEach(item => {
             const projected = validateItem(item, data.config_id, true)
             check(item.host_id_supported === startupCapabilities.configs[CONFIGS.indexOf(data.config_id)].host_id_supported[item.slot_index])
+            const title = titles[data.config_id][projected.slot_index]
+            check(title ? TITLE_KEYS.every(key => projected[key] === title[key]) :
+                projected.title_observed === false && projected.title_state === 'unobserved' && projected.title_alias === null,
+                'TITLE_FEEDBACK_MISMATCH')
             check(projected.slot_index === openSnapshot.items.length, 'SLOT_SEQUENCE'); openSnapshot.items.push(projected)
         })
         if (data.snapshot_complete) {

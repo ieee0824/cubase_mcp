@@ -12,13 +12,15 @@ const CONFIGS = ['IO_INPUT_ALL', 'IO_OUTPUT_ALL']
 const SHA = 'a'.repeat(64)
 const CANARY = 'PRIVATE_TITLE_ID_ERROR_PATH_DO_NOT_EMIT'
 
-function fixture({ source = 'synthetic-source', hostIds = false, feedback = false, navigation = false, capabilities = false } = {}) {
+function fixture({ source = 'synthetic-source', hostIds = false, feedback = false, navigation = false,
+    capabilities = false, queuedFeedback = false, navigationFeedback = true, emptyTitles = false } = {}) {
     const manifest = { version: 1, profile: PROFILE, expected_collector_sha256: SHA,
         host: { cubase_version: '13.0.30', api_version: '1.1' }, ui_review: 'pending',
         expected_probe_files: { 'CubaseMCPIOProbe_CubaseMCPIOProbe.js': SHA, 'io-profile.js': SHA, 'wire.js': SHA } }
     const records = []; let clock = 0; let sequence = 0; let events = 0; let responses = 0
     let requests = 0; let snapshots = 0; let observation = 0; let lastReceive = 10
     const generations = { IO_INPUT_ALL: 1, IO_OUTPUT_ALL: 1 }
+    const titles = { IO_INPUT_ALL: Array(8).fill(false), IO_OUTPUT_ALL: Array(8).fill(false) }
     const add = record => records.push({ record_format_version: 1, run_id: 'synthetic-run',
         timestamp_unix_ms: 100000 + clock, monotonic_timestamp_ms: clock, ...record })
     const emit = message => {
@@ -45,10 +47,17 @@ function fixture({ source = 'synthetic-source', hostIds = false, feedback = fals
         return id
     }
     const item = (index, withConfig, configId) => ({ ...(withConfig ? { config_id: configId } : {}), slot_index: index,
-        title_observed: feedback && index === 0, title_state: feedback && index === 0 ? 'nonempty' : 'unobserved',
-        title_alias: feedback && index === 0 ? 'title-1' : null,
+        title_observed: titles[configId][index], title_state: titles[configId][index] ? (emptyTitles ? 'empty' : 'nonempty') : 'unobserved',
+        title_alias: titles[configId][index] && !emptyTitles ? 'title-1' : null,
         host_id_supported: hostIds, host_id_status: hostIds ? 'supported' : 'unsupported',
         host_id_alias: hostIds ? 'host-' + (index + 1) : null })
+    const titleFeedback = configId => {
+        titles[configId][0] = true
+        const state = item(0, false, configId)
+        if (hostIds) { state.host_id_status = 'unobserved'; state.host_id_alias = null }
+        event('probe.io.feedback', { config_id: configId, activation_epoch: 1,
+            generation: generations[configId], observation_id: ++observation, item: state })
+    }
     add({ record_type: 'collector_started', session_id: 'synthetic-session', collector_binary_sha256: SHA,
         probe_profile: PROFILE, probe_transport_version: 1, resolved_midi_input_port: CANARY })
     clock = 10; add({ record_type: 'collector_checkpoint', phase: 'begin', checkpoint_id: 'IO', window_ms: 1000 })
@@ -71,16 +80,18 @@ function fixture({ source = 'synthetic-source', hostIds = false, feedback = fals
         response(request('probe.capabilities.get'), records.find(record => record.message?.event === 'probe.capabilities').message.data)
     }
     CONFIGS.forEach(configId => {
-        if (feedback) {
-            const state = item(0, false, configId)
-            if (hostIds) { state.host_id_status = 'unobserved'; state.host_id_alias = null }
-            event('probe.io.feedback', { config_id: configId, activation_epoch: 1,
-                generation: generations[configId], observation_id: ++observation, item: state })
-        }
+        if (feedback && !queuedFeedback) titleFeedback(configId)
         const method = navigation ? 'probe.bank.next' : 'probe.bank.snapshot'
         const id = request(method, { config_id: configId })
-        if (navigation) generations[configId]++
+        if (feedback && queuedFeedback) titleFeedback(configId)
+        if (navigation) {
+            generations[configId]++
+            titles[configId].fill(false)
+        }
         response(id, { config_id: configId, scheduled: true, ...(navigation ? { action: 'next' } : {}) })
+        // Navigation clears the old slot state. Only a new callback can make
+        // the new generation's title observed, even when the title is equal.
+        if (feedback && navigation && navigationFeedback) titleFeedback(configId)
         const snapshotId = 'snapshot-' + (++snapshots)
         for (let chunk = 0; chunk < 4; chunk++) event('probe.bank.chunk', {
             activation_epoch: 1, generation: generations[configId], observation_id: observation,
@@ -154,11 +165,102 @@ test('API 1.3 aliases and navigation are projected without inferring identities 
     const { records, manifest } = fixture({ hostIds: true, feedback: true, navigation: true })
     manifest.host = { cubase_version: '15.0.30', api_version: '1.3' }
     const report = audit(records, manifest)
-    assert.equal(report.counts.feedback, 2)
+    assert.equal(report.counts.feedback, 4)
     assert.equal(report.snapshots[0].generation, 2)
     assert.equal(report.snapshots[0].items[0].host_id_alias, 'host-1')
     assert.equal(report.snapshots[0].items[0].title_alias, report.snapshots[1].items[0].title_alias)
     assert.ok(report.limitations.some(value => value.includes('title aliases are not identities')))
+})
+
+test('queued old-generation feedback remains valid until the successful navigation response', () => {
+    for (const selected of [false, true]) {
+        const { records, manifest } = fixture({ navigation: true, feedback: true, queuedFeedback: true })
+        if (selected) {
+            for (const id of ['request-2', 'request-3']) delayEvidence(records, id, { selected: true, afterChunks: true })
+        }
+        const report = audit(records, manifest)
+        assert.equal(report.counts.feedback, 4)
+        assert.ok(report.snapshots.every(snapshot => snapshot.generation === 2 && snapshot.items[0].title_alias === 'title-1'))
+    }
+})
+
+test('navigation clears title observations until a new callback, without treating silence as empty', () => {
+    const { records, manifest } = fixture({ navigation: true, feedback: true, navigationFeedback: false })
+    const report = audit(records, manifest)
+    assert.equal(report.counts.feedback, 2)
+    assert.ok(report.snapshots.every(snapshot => snapshot.items.every(item =>
+        item.title_observed === false && item.title_state === 'unobserved' && item.title_alias === null)))
+    rejection(records => {
+        Object.assign(chunks(records)[0].message.data.items[0], {
+            title_observed: true, title_state: 'nonempty', title_alias: 'title-1'
+        })
+    }, { navigation: true, feedback: true, navigationFeedback: false })
+})
+
+test('snapshot titles must match the latest feedback for their config, generation and slot', () => {
+    rejection(records => {
+        Object.assign(chunks(records)[0].message.data.items[0], {
+            title_observed: true, title_state: 'nonempty', title_alias: 'title-256'
+        })
+    })
+    rejection(records => { chunks(records)[0].message.data.items[0].title_alias = 'title-2' }, { feedback: true })
+    rejection(records => {
+        Object.assign(chunks(records)[0].message.data.items[1], {
+            title_observed: true, title_state: 'nonempty', title_alias: 'title-1'
+        })
+    }, { feedback: true })
+    rejection(records => {
+        // The input slot's feedback cannot supply the output slot's title.
+        records.filter(record => record.message?.event === 'probe.io.feedback')[1].message.data.item.slot_index = 1
+    }, { feedback: true })
+    rejection(records => {
+        Object.assign(chunks(records)[0].message.data.items[0], {
+            title_observed: false, title_state: 'unobserved', title_alias: null
+        })
+    }, { feedback: true })
+    rejection(records => {
+        Object.assign(chunks(records)[0].message.data.items[0], {
+            title_observed: true, title_state: 'empty', title_alias: null
+        })
+    })
+})
+
+test('observed empty titles remain distinct from unobserved slots', () => {
+    const { records, manifest } = fixture({ feedback: true, emptyTitles: true })
+    const report = audit(records, manifest)
+    assert.ok(report.snapshots.every(snapshot => snapshot.items[0].title_observed && snapshot.items[0].title_state === 'empty'))
+    assert.ok(report.snapshots.every(snapshot => !snapshot.items[1].title_observed && snapshot.items[1].title_state === 'unobserved'))
+})
+
+test('title feedback cannot claim a host ID sample or an unobserved callback', () => {
+    for (const status of ['supported', 'empty']) {
+        rejection(records => {
+            const item = records.find(record => record.message?.event === 'probe.io.feedback').message.data.item
+            item.host_id_status = status
+            item.host_id_alias = status === 'supported' ? 'host-1' : null
+        }, { hostIds: true, feedback: true })
+    }
+    rejection(records => {
+        Object.assign(records.find(record => record.message?.event === 'probe.io.feedback').message.data.item, {
+            title_observed: false, title_state: 'unobserved', title_alias: null
+        })
+    }, { feedback: true })
+})
+
+test('navigation does not accept a new generation before success or an old generation after success', () => {
+    for (const generation of [2, 3]) {
+        rejection(records => {
+            records.find(record => record.message?.event === 'probe.io.feedback').message.data.generation = generation
+        }, { navigation: true, feedback: true, queuedFeedback: true })
+    }
+    rejection(records => {
+        records.filter(record => record.message?.event === 'probe.io.feedback')[1].message.data.generation = 1
+    }, { navigation: true, feedback: true })
+    rejection(records => {
+        const reply = records.find(record => record.message?.id === 'request-2').message
+        delete reply.result
+        reply.type = 'error'; reply.error = { code: 'BUSY', message: 'BUSY' }
+    }, { navigation: true, feedback: true })
 })
 
 test('source IDs, paths and source session identifiers are never copied into successful output', () => {

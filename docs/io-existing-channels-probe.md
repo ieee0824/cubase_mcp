@@ -11,6 +11,7 @@
 - `title_state: unobserved`はcallback未受信、`empty`は空文字列を実際に受信したことを表します。未通知を空slotとみなさず、空slot・同じpage・callback停止から列挙終端を推測しません。
 - host ID getterの不存在、未採取、空文字、取得エラーを区別します。snapshotは常に`metadata_only: true`、`complete: false`です。8 slotの分割転送完了は、全busの取得完了ではありません。
 - 旧callback参照はactivation / generationで拒否します。ただしホストが新しいhandlerへ古い通知を配送した場合、APIから通知元generationを識別できません。
+- bank移動の成功responseを送信上のgeneration境界にします。移動前のqueued feedbackは先に送信し、送信中の再入callbackで旧feedbackが残った場合はbankを動かさず`BUSY`を返します。auditorは成功responseで対象bankのtitle観測を未通知へ戻し、そのgeneration / slotのfeedbackとsnapshotのtitle状態を照合します。旧generationのtitleを持ち越したsnapshotや、callbackのない観測済みtitleは受理しません。
 - static確認ではCubase 13.0.30 / API 1.1には明示的な中央zone includeとbank channelのID getterがなく、15.0.30 / API 1.3にはあります。これは実機での挙動確認とは別です。
 - 生の名前を送信しないため、このprofileだけでUI上の各busとの名前一致や同一性は検証できません。UI inventoryとの比較ではこの制約を残し、aliasから名前・type・routingを復元しません。
 

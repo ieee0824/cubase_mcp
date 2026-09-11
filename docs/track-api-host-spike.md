@@ -345,6 +345,37 @@ collectorはcheckpoint終了時に上記`1000 ms` quiet periodをlast-message cl
 
 reload / restartをまたぐsequence値を同じ系列として比較しません。ただし、旧sessionのrecordが新session開始後に到着した場合はorphanとしてphaseを`INCONCLUSIVE_SEQ_ORDER`にします。seq gap、`probe.overflow`、未完request / snapshot / host-ID fragment、deactivation discardがあるrunからbank完全性、callback不存在、ID寿命、終端を結論付けません。
 
+## 2026-09-11の手動補足診断（正式runへ不算入）
+
+Cubaseを既に起動した状態でfreshなprimary collectorを開始し、ユーザーがC1 baselineを手動で開いた後、LOAD / `MB_CORE_ALL` Reset / Nextの3区間を採取しました。自動UI操作は行わず、開いたprojectの識別は読み取りで確認しました。hostへの要求はProbe discovery、capability、snapshot、専用bank navigationだけです。再生・録音、Track状態・routingの変更、project保存は行っていません。
+
+これはguard・校正・formal manifest・全UI ground truth照合・44 checkpointを伴わない補足診断です。collectorはdebug buildであり、正式なcold-launch INITやrelease再build照合も行っていません。以下はlocal rawの限定的な照合結果であって、正式auditorのaccepted reportではありません。文書状態、runtime表、完了checklistは更新せず、`OBSERVED`や全Track列挙の成功へ読み替えません。
+
+| provenance | 値 |
+| --- | --- |
+| repository commit | `eee03f319b7b1317796f29d069aad0775d87110c` |
+| host | app bundle `15.0.30.287`、Probe runtime補助値 `15.0.30`（Aboutによるformal照合ではない） |
+| primary Probe source / deployed SHA-256 | `7629d96cfc40a6b6928ff952a5ced17699714b12f146cf9ec2abdf97695b275c`（両者一致。installer embeddedのformal照合とは区別） |
+| 実行したdebug collector SHA-256 | `f1ef81929d05bb54b6355490fef7a41bd07b9a8a62866e01d61b099d65e5694c` |
+| local raw JSONL SHA-256 | `9957c9d1c1f5672e03e2243aa120694dfae2a587227d65f0f6dabeafc8c1e147` |
+| C1 baseline SHA-256 | `0fd1a0788efe52ec7621049a28fbe351dc09496703171675b65a48b2628f0204`（open前と収集終了後で一致） |
+
+rawは595行、1 sourceの559 message（seq 1〜559）、完了request 11件、完了chunk stream 35組です。collector summaryは`integrity_ok: true` / `exit_ok: true`、gap・duplicate / reorder・queue drop・source overflow・parse error・error response・orphanはすべて0、pending request / follow-up / open snapshotも0でした。3 checkpointを閉じ、EOF後のgraceful drainも完了しています。これらは通信記録の整合性であり、fixtureの正しさや列挙範囲の完全性ではありません。
+
+| 区間 | 明示的final snapshotの順 | ALL bank generation / slot数 | 取得できたID数 | finalのselected / mute / solo |
+| --- | --- | --- | --- | --- |
+| LOAD | DirectAccess → ALL → VISIBLE | 1 / 8 | 7 / 8 | ALL / VISIBLEとも全24 fieldが現generation |
+| Reset | DirectAccess → ALL | 2 / 8 | 7 / 8 | 全24 fieldが現generation |
+| Next | DirectAccess → ALL | 3 / 8 | 8 / 8 | 全24 fieldが現generation |
+
+各区間で5秒以上の観測後にfinal snapshot setを完了し、そのset中の予期しないeventは0、終了前quietはそれぞれ24,598 / 22,356 / 149,639 msでした。LOAD / Resetの同名2 slotは異なるIDを返し、取得できた7 IDはReset後も一致しました。Nextでは別の8枠を取得していますが、最終pageや終端は検証していません。
+
+Reset直後の`command_reset` snapshotではselected / mute / soloの24 fieldがすべて`null`で、その後のgeneration 2のfeedbackで埋まりました。Reset応答のcollector受信を基点に、前者は+101〜104 ms、後者は+219〜233 msでした。これはcollector受信時刻の差であり、host内部の処理時間ではありません。navigation成功や直後のsnapshotだけから状態の収束を推測できない実例です。
+
+LOAD / Resetの1 slotは`title_redacted: true`で、host IDも`title_not_authorized`により取得していません。原因をUnicode変換と断定せず、fixtureの合成名とallowlistの一致を次に確認します。また`CMCP_08_HIDDEN`という名前のnodeはDirectAccessで`mixer_visible: true`を返し、`M0`を含む複数の合成名でもmuteはtrueでした。名前をvisibilityや明示Mute状態の証拠にせず、UI設定・同期設定・Soloの影響とbindingの意味を切り分ける必要があります。保護処理を緩めたり、欠けた値を補完したりはしていません。
+
+DirectAccessはsupported / activeを返し、3区間の明示的snapshotは`mix_console_root_children_v1` / depth 1 / `scope_complete: true`、error / truncationなしでした。root child count 21に対してrootを含むobservation 21件とshared reference 1件を返しています。これは既定のroot-child projection内の記録であり、Project全体のTrack数やFolderの完全性を証明しません。end / partial page、空・1本・8本、visibility差、mutation、reload / restart、Cubase 13、別profileのInput / Output調査は引き続き未完了です。Issue #3はopen、productionの`tracks.list`はfalseのままです。
+
 ## Runtime run matrix
 
 | physical run / profile | exact host | API | access projection | fixture cases | status |

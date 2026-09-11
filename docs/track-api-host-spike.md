@@ -374,6 +374,10 @@ Reset直後の`command_reset` snapshotではselected / mute / soloの24 fieldが
 
 LOAD / Resetの1 slotは`title_redacted: true`で、host IDも`title_not_authorized`により取得していません。原因をUnicode変換と断定せず、fixtureの合成名とallowlistの一致を次に確認します。また`CMCP_08_HIDDEN`という名前のnodeはDirectAccessで`mixer_visible: true`を返し、`M0`を含む複数の合成名でもmuteはtrueでした。名前をvisibilityや明示Mute状態の証拠にせず、UI設定・同期設定・Soloの影響とbindingの意味を切り分ける必要があります。保護処理を緩めたり、欠けた値を補完したりはしていません。
 
+該当slotのtitleは、LOADの`mixer_bank_channel` / `selected_binding`の両callback経路、およびResetで受信した`mixer_bank_channel`経路で一貫してredactedでした。同じ区間内で許可されたtitleが別経路によってredactされた形跡はありません。sourceでは固定NFC / NFDをともに許可し、allowlist不一致の判定はwire encode前、ID getter呼出し前に行います。したがって、`title_not_authorized`を「CubaseにID取得能力がない」と解釈しません。既存primary JavaScriptテストは成功しており、実際のUI受理文字列・callback入力との差はまだ特定できていません。
+
+ALL Next区間では、操作対象ではないVISIBLE側にもtitle更新のfeedbackが到着しました。VISIBLEのtitle callback 16件（2経路 × 8 slot）とstate callback 24件は、後続の明示的DirectAccess snapshot要求より前に受信しています。たとえばslot 3は両bankで`CMCP_13_STATE_S0_M0_SO0`へ変わりますが、ALLの`bank_generation`は3、VISIBLEは1のままです。これはProbeが要求対象configだけのgenerationを進める実装と整合し、generationが同じならslot割当が不変だという保証にはなりません。この区間ではVISIBLEの明示的final snapshotやUI上のbank位置を取得していないため、bank間の独立性・同期offset・VISIBLEの最終一覧を確定せず、callbackで見えた連動候補として方式比較へ残します。
+
 DirectAccessはsupported / activeを返し、3区間の明示的snapshotは`mix_console_root_children_v1` / depth 1 / `scope_complete: true`、error / truncationなしでした。root child count 21に対してrootを含むobservation 21件とshared reference 1件を返しています。これは既定のroot-child projection内の記録であり、Project全体のTrack数やFolderの完全性を証明しません。end / partial page、空・1本・8本、visibility差、mutation、reload / restart、Cubase 13、別profileのInput / Output調査は引き続き未完了です。Issue #3はopen、productionの`tracks.list`はfalseのままです。
 
 ## Runtime run matrix

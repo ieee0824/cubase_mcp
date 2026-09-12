@@ -102,8 +102,9 @@ test('rejects oversized stdin before EOF without creating artifacts', { timeout:
         }
     }
     child.stdin.on('drain', feed)
+    let inputError
     child.stdin.on('error', error => {
-        if (error.code !== 'EPIPE' && error.code !== 'ERR_STREAM_DESTROYED') throw error
+        inputError = error
     })
     const finished = new Promise((resolve, reject) => {
         child.once('error', reject)
@@ -114,6 +115,9 @@ test('rejects oversized stdin before EOF without creating artifacts', { timeout:
         feed()
         assert.deepEqual(await finished, { code: 1, signal: null })
         assert.match(stderr, /stdin exceeds the size limit/)
+        // Early rejection closes the pipe while the parent may still be
+        // writing. Windows reports EOF where POSIX normally reports EPIPE.
+        if (inputError) assert.ok(['EPIPE', 'EOF', 'ERR_STREAM_DESTROYED'].includes(inputError.code), inputError.message)
         assert.deepEqual(fs.readdirSync(directory), [])
     } finally {
         clearTimeout(timer)

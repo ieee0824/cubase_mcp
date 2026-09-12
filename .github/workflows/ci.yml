@@ -59,6 +59,7 @@ jobs:
         run: |
           bash -n scripts/check-input-guard-calibration.sh
           bash -n scripts/check-input-guard-sampling.sh
+          bash -n scripts/start-input-guard.sh
           bash -n scripts/check-track-probe-evidence.sh
           node tests/track_probe_evidence_checker.test.js
           node tests/finder_calibration_state.test.js
@@ -75,6 +76,10 @@ jobs:
 
       - name: Test Computer Use capture recorder
         run: node --test tests/cua_capture_recorder.test.js
+
+      - name: Test input guard launch handshake
+        if: runner.os != 'Windows'
+        run: node --test tests/input_guard_launcher.test.js
 
       - name: Build release binaries
         run: cargo build --release --locked

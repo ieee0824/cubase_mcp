@@ -127,6 +127,20 @@ SDK headerの`CGEventSourceKeyState` / state IDとRustのFFI型・定数に不�
 
 現時点の運用候補は、必要な権限承認を先に済ませ、sampleの外側で3秒待ってからguardを開始し、実際の`ready`と各`arm` / `check`を必須にする方法です。3秒で必ず安全になるという保証ではありません。held / timeout / race等が返れば停止し、同じrunを待機や自動再起動で救済しません。異なるparent / pipe / tool contextへの互換性は#35で別途照合します。
 
+### 承認と計測開始を分離するlauncher
+
+`scripts/start-input-guard.sh GUARD_BINARY EXPECTED_SHA256 NEW_LAUNCH_LOG`は、権限承認後もガードを即時起動しません。絶対pathの実行可能な通常fileとSHA-256を照合し、別の新規logへ`awaiting_start`を書いて待機します。operatorが承認操作を終えてキー・ボタンを離した後に、stdinへASCIIの`start`と改行を送ります。launcherはsample外で3秒待ち、binaryを再照合してから同じPIDを未変更のguardへ`exec`します。
+
+- launcherの待機通知はguardの`ready`ではありません。実際のguard `ready`を読むまで、`arm`やCubaseの操作を送ってはいけません。
+- `start`はoperatorの開始合図であり、キー解放の検出・承認済み状態の認証ではありません。必要な承認はlauncherの起動前に済ませ、armed区間に新しい承認操作が入ったら通常の干渉として扱います。
+- launcherのstdoutはguardのraw JSONL用、stderrはguard stderr用に分離して記録できます。launcher自身の起動失敗もstderrへ出るため、その場合は不採用です。launch logはclosed evidence directoryの**外**へ保存し、校正や正式runのraw streamへ混ぜません。
+- logは新規作成のみで、既存file・symlinkを拒否します。EOF、不正な開始合図、待機中のbinary差し替えはguard起動前に失敗します。起動後の`KEY_HELD`等の出力とexit statusをそのまま返し、再試行やキー解放注入はしません。
+- 新しいlauncherの採用は起動contextの変更として記録します。凍結guardが同一でも、旧校正のexact-contextを自動で採用済みにせず、正式run前の照合を残します。
+
+承認キーを離す前にguardが起動したという仮説は、OS全体のheld-stateを読む実装と整合します。ただし以前の承認方法・キー解放時刻は記録していないため、過去の`KEY_HELD`の原因を特定済みにはしません。承認済みcontrollerから開始した、ユーザー確認付きの無操作診断2回では計84 sampleの押下数が0でしたが、これは以前の承認timingの再現実験ではありません。launcherの自動テストもprocess / stdio / handshakeの検証であり、OS入力の実測や正式校正を代替しません。
+
+2026-09-13のlauncher導入検証では、自動テスト16/16に加え、未変更の凍結guardを使う新規の権限付きshell / PTY processを1回実行しました。承認後の`awaiting_start`時点でguard stdout / stderrが0 byteであること、開始合図後に同じPIDのguardが`ready`を返すことを確認し、UI操作なしで`arm → check → finish`を完了しました。rawは連続4 record、全16 delta 0、空stderr、exit 0でした。この新しい区間についてユーザー無操作の確認は取得していないため、先の84 sampleのattestationを流用しません。rawと別のlaunch logはローカルに保持し、正式runや校正bundleには算入しません。
+
 - 自動操作の準備が済んでから、対象の物理入力controlに対する現在の準備確認を得ます。過去の「準備OK」を新しい入力区間の確認に使いません。
 - 各controlの入力内容、開始、終了を明示します。見落としやtiming違いがあれば、そのcontrolのプロセスは未成立として残します。ユーザーの操作ミスと断定しません。
 - 「部分確認済み実測action数 / 14」「完全bundle数 / 8」「決定的テスト結果」「校正全体の合否」と「採用済みCubase実測数 / 2」を分けて表示します。工程数を作業量の割合に換算しません。

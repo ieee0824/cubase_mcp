@@ -380,6 +380,22 @@ ALL Next区間では、操作対象ではないVISIBLE側にもtitle更新のfee
 
 DirectAccessはsupported / activeを返し、3区間の明示的snapshotは`mix_console_root_children_v1` / depth 1 / `scope_complete: true`、error / truncationなしでした。root child count 21に対してrootを含むobservation 21件とshared reference 1件を返しています。これは既定のroot-child projection内の記録であり、Project全体のTrack数やFolderの完全性を証明しません。end / partial page、空・1本・8本、visibility差、mutation、reload / restart、Cubase 13、別profileのInput / Output調査は引き続き未完了です。Issue #3はopen、productionの`tracks.list`はfalseのままです。
 
+## 2026-09-12のUI補足照合（正式runへ不算入）
+
+repository commit `dc243975f0cacc6fac5925b6c10ca25dad76e7fd`で、上記C15のC1 projectをユーザーの手動操作と読み取り専用の画面取得で照合しました。自動clickは操作ツールの接続切断で失敗し、post-stateに変化がなくinput guardも干渉なしだったため、postcondition不成立としてそのguard sessionをreject / 終了しています。その失敗を正常な自動操作へ読み替えず、以下は独立した手動UI照合として扱います。新しいProbe collector / callback capture / formal manifestはありません。
+
+| 確認対象 | 今回得た限定的な証拠 | 未確認のままの事項 |
+| --- | --- | --- |
+| P05の名前 | ユーザーが名前欄からcopyしてchatへ貼り付けた`CMCP_05_日本語_é_🎹`は固定NFCと完全一致。15 Unicode scalar values / 25 UTF-8 bytes | host callbackへ渡された文字列、前日のredacted slotとの厳密な対応 |
+| P08の表示と同期 | separate `MixConsole`のVisibility listに`CMCP_08_HIDDEN`が残り、表示channel列はP07からP09へ飛ぶ。同期popupの`MixConsole と プロジェクト を同期`にcheckがある | 前日のcapture時の同期状態、DirectAccessの`mixer_visible: true`との差の原因 |
+| P05のMute / Solo表示 | global Soloがactiveな状態で、separate MixConsoleのP05はMuteが黄色・Soloが灰色。そのwindowを閉じた後のfresh Project表示ではP05のMute / Soloがともに灰色 | APIのmute booleanが表す状態、表示差の原因、明示MuteとSolo由来のeffective muteの区別 |
+
+名前は変更せずallowlistも緩めていません。同期menuは項目を選ばずcheckを読むだけとし、chatへ戻ると閉じるため、ユーザーが開いたまま返信せず待つ間に15秒後の画面を取得しました。Mute / Soloは操作せず、20秒後のfresh Project画面との表示比較だけを行っています。これらの画面は同時snapshotやAPI値の正規化根拠ではありません。
+
+手動でP05を選択した後にRecord Enableが赤くONの画面を確認したため、名前確認を止め、ユーザーがOFFへ戻した後に灰色のcontrolをfresh画面で確認して続けました。選択時の自動arm設定が原因かは未検証です。再生・録音・project保存は依頼も実行もしておらず、baseline fileのSHA-256は前節の値と診断前後で一致しました。ただし現在の選択はP05で、fixture必須のP17〜P20ではありません。Project toolbarの表示は`21/22`であり、fixtureの20 Project Trackとの厳密な件数・階層照合も未実施です。保存fileが未変更であることを、現在のUI状態やfixture全体の成立へ読み替えません。
+
+今回の3項目の照合はsetup診断の進捗であり、正式runの完了数ではありません。全runtime表とIssue #3の完了条件は引き続き未達です。次の優先事項はfixture件数・選択・安全条件を確定し、freshな実機captureでUIとcallbackの差を切り分けることです。raw image / local path / device名はrepositoryへ追加しません。
+
 ## Runtime run matrix
 
 | physical run / profile | exact host | API | access projection | fixture cases | status |

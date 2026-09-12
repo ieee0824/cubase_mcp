@@ -83,6 +83,16 @@ node scripts/record-cua-capture.js \
 
 ## operatorとの同期と進捗
 
+### Issue #32の無入力起動診断（2026-09-12）
+
+macOS 26.5.1 / build 25F80 / arm64で、権限付きの読み取り専用診断を一度実行しました。CoreGraphicsのcombined-session / HID-system両tableでsample中のaggregate変化なし、通常範囲・拡張範囲のkey押下数0、mouse button押下数0、Caps Lock / modifier flagなしでした。key番号・入力内容・device識別子は出力していません。
+
+続いて同じ未変更のrelease guard（SHA-256 `a2d5e521b0df561c6d0a350ea557cf87c2d53c160be2a3e94080ed2418e015c4`）を、権限付き`exec_command`から直接起動しました。tool sessionで`ready` → `arm` → `check` → `finish`、record sequence 1〜4、exit status 0を確認しました。arm / check sampleはそれぞれUnix-ms `1789218676033` / `1789218680288`で、全16 deltaが0、`interference_detected: false`でした。UIへの入力は行っていません。この診断のterminal出力はformal calibration用のraw bundleではなく、校正合格に算入しません。
+
+SDK headerの`CGEventSourceKeyState` / state IDとRustのFFI型・定数に不一致は見つかりませんでした。Appleは[HID-system tableをhardware event sourceの集約状態](https://developer.apple.com/documentation/coregraphics/cgeventsourcestateid)として説明しています。現在の実装はaggregateがsample中に変化した場合を先に拒否し、その後key stateがtrueなら`KEY_HELD`を返します。今回の成功は「現在は同じbinaryで起動できる」ことの確認であり、過去の押下主体や残留状態の原因を特定するものではありません。
+
+#32の残件は、過去の失敗と今回の成功の条件差・再現条件の切り分けです。恒常的な故障と断定せず、無入力snapshot単独を安全保証にせず、実操作ごとのguard / target / postcondition検証は引き続き必要です。起動条件を調べるためにrelease guardを書き換えたり、キー解放を注入したり、ユーザー操作を依頼したりはしていません。
+
 - 自動操作の準備が済んでから、対象の物理入力controlに対する現在の準備確認を得ます。過去の「準備OK」を新しい入力区間の確認に使いません。
 - 各controlの入力内容、開始、終了を明示します。見落としやtiming違いがあれば、そのcontrolのプロセスは未成立として残します。ユーザーの操作ミスと断定しません。
 - 「部分確認済みaction数 / 15」「完全bundle数 / 9」「校正全体の合否」と「採用済みCubase実測数 / 2」を分けて表示します。工程数を作業量の割合に換算しません。

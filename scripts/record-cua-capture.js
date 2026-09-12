@@ -14,6 +14,23 @@ const path = require('node:path')
 const MAX_APP_BYTES = 1024
 const MAX_STATE_BYTES = 4 * 1024 * 1024
 const MAX_SCREENSHOT_BYTES = 64 * 1024 * 1024
+// Includes base64 expansion, JSON escaping of AX text, and framing overhead.
+// Bound input before JSON.parse, including streams which never send EOF.
+const MAX_INPUT_BYTES = 128 * 1024 * 1024
+
+function readCaptureInput() {
+    const chunks = []
+    const buffer = Buffer.alloc(64 * 1024)
+    let total = 0
+    while (true) {
+        const count = fs.readSync(0, buffer, 0, Math.min(buffer.length, MAX_INPUT_BYTES - total + 1), null)
+        if (count === 0) break
+        total += count
+        if (total > MAX_INPUT_BYTES) fail('stdin exceeds the size limit')
+        chunks.push(Buffer.from(buffer.subarray(0, count)))
+    }
+    return Buffer.concat(chunks, total).toString('utf8')
+}
 
 function fail(message) {
     throw new Error(`record-cua-capture: ${message}`)
@@ -78,11 +95,13 @@ function parseCapture(input) {
     if (typeof capture.screenshot_base64 !== 'string' ||
         capture.screenshot_base64.length === 0 ||
         capture.screenshot_base64.length > 4 * Math.ceil(MAX_SCREENSHOT_BYTES / 3) ||
-        capture.screenshot_base64.length % 4 !== 0 ||
-        !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(capture.screenshot_base64)) {
+        capture.screenshot_base64.length % 4 !== 0) {
         fail('screenshot_base64 must be canonical base64')
     }
     const screenshot = Buffer.from(capture.screenshot_base64, 'base64')
+    // Decode/re-encode equality rejects invalid alphabet, whitespace, misplaced
+    // padding and nonzero pad bits without a repeating-group regex whose stack
+    // usage grows with the size of an otherwise valid screenshot.
     if (screenshot.toString('base64') !== capture.screenshot_base64) fail('screenshot_base64 is not canonical')
     if (screenshot.length > MAX_SCREENSHOT_BYTES) fail('screenshot exceeds the size limit')
     return { ...capture, screenshot }
@@ -125,7 +144,7 @@ function sha256(contents) {
 
 function main() {
     const { outputDirectory, captureId } = parseArguments(process.argv.slice(2))
-    const capture = parseCapture(fs.readFileSync(0, 'utf8'))
+    const capture = parseCapture(readCaptureInput())
     const extension = screenshotExtension(capture.screenshot)
     ensureCaptureDirectory(outputDirectory)
 

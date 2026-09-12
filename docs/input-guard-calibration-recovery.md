@@ -65,7 +65,9 @@ node scripts/record-cua-capture.js \
   --capture-id cal.automation.open-pre
 ```
 
-標準出力の`state_path` / `state_sha256` / `screenshot_path` / `screenshot_sha256`と`captured_at` / `app`を、そのcaptureを参照するoperator traceへそのまま記録します。既存ID、symbolic link directory、非canonical base64、非画像、範囲外timestamp、またはsize上限超過はfail closedです。ID衝突や部分書込みが起きたdirectoryを成功bundleとして再利用せず、新しいdirectoryから採取します。
+標準出力の`state_path` / `state_sha256` / `screenshot_path` / `screenshot_sha256`と`captured_at` / `app`を、そのcaptureを参照するoperator traceへそのまま記録します。既存ID、出力directory自身または直下の`states` / `screenshots`のsymbolic link、非canonical base64、PNG/JPEG以外のsignature、範囲外timestamp、またはsize上限超過は拒否します。stdinはJSON解析前に128 MiBで制限し、AX textは4 MiB、画像bytesは64 MiBを上限とします。画像signatureの確認は完全な画像デコードではありません。破損・切断した画像のデコード検証は既存のevidence checkerが担当します。
+
+出力先とその祖先directoryは信頼できるローカル管理下に置き、書込み中に別プロセスから差し替えないでください。この補助は祖先のsymlinkや並行したdirectory差替えを防ぐsandboxではありません。ID衝突や部分書込みが起きたdirectoryを成功bundleとして再利用せず、新しいdirectoryから採取します。
 
 この補助はguard結果、freshness、target binding、physical input、またはpostconditionを証明しません。`arm`後のstate保存はUIへinputを注入しないローカルI/Oとして行い、Computer Useのsingle target-bound callを置き換えたり、別のUI callを追加したりしません。
 

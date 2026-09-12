@@ -44,6 +44,31 @@ node tests/input_guard_calibration_checker.test.js
 
 後者はmacOSの`sips`等を使う既存のsynthetic evidence testです。合格しても実際の物理入力を校正したことにはなりません。controllerへ渡す入力schemaと出力JSONLのschemaも混同しないよう、採取前にpure builderで検証します（例: controller入力の`timing.callStartedAt`と出力の`call_started_at`は別です）。
 
+### Computer Use captureの保存
+
+`scripts/record-cua-capture.js`は、Computer Useが**すでに同一観測で取得した**full AX textとscreenshot bytesを、校正checkerが要求する別々のstate JSONとPNG/JPEGへ保存するローカル補助です。画面を独自に取得せず、UIを操作せず、`screencapture`等の別の画面取得経路も使いません。stdinには次の4 keyだけを持つ1個のJSON objectを渡します。
+
+```json
+{
+  "app": "Finder",
+  "captured_at": "2026-09-12T20:48:00.123+09:00",
+  "text": "full AX text from the same fresh Computer Use capture",
+  "screenshot_base64": "base64 of that capture's PNG or JPEG bytes"
+}
+```
+
+呼び出しはabsolute output directoryと、再利用しないASCII capture IDを指定します。
+
+```sh
+node scripts/record-cua-capture.js \
+  --output-directory /absolute/local/evidence/calibration \
+  --capture-id cal.automation.open-pre
+```
+
+標準出力の`state_path` / `state_sha256` / `screenshot_path` / `screenshot_sha256`と`captured_at` / `app`を、そのcaptureを参照するoperator traceへそのまま記録します。既存ID、symbolic link directory、非canonical base64、非画像、範囲外timestamp、またはsize上限超過はfail closedです。ID衝突や部分書込みが起きたdirectoryを成功bundleとして再利用せず、新しいdirectoryから採取します。
+
+この補助はguard結果、freshness、target binding、physical input、またはpostconditionを証明しません。`arm`後のstate保存はUIへinputを注入しないローカルI/Oとして行い、Computer Useのsingle target-bound callを置き換えたり、別のUI callを追加したりしません。
+
 ## operatorとの同期と進捗
 
 - 自動操作の準備が済んでから、対象の物理入力controlに対する現在の準備確認を得ます。過去の「準備OK」を新しい入力区間の確認に使いません。

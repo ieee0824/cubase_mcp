@@ -18,7 +18,15 @@
 
 同日の移行検証では、完了済み8 bundleの80 file（24 process fileと28+28 capture）を別の候補directoryへexclusive copyし、元とcopyのbyte/digest一致、8 distinct identity、時刻、capture、各controlの条件をv4 checkerで一括検証しました。実測14/14と決定的12/12は機械検証済みです。旧race失敗、各bundleの旧report、copy provenance、原本はrepository外に保持しています。
 
-隔離offline release buildと既存の凍結guardはbyte単位で一致し、SHA-256は引き続き`a2d5e521b0df561c6d0a350ea557cf87c2d53c160be2a3e94080ed2418e015c4`です。全Rust target、校正checker、final checkerのcontract、sampling runnerの偽成功拒否、Finder parserの回帰テストを確認しました。実測の成功を、未確認のcontextへ自動で広げません。automation bundleのNode parent / pipeとphysical bundleのshell / PTY等の起動差、操作ツール実装・権限・表示条件の最終照合、およびformal runへのclean commit / inventoryの結び付けは別の残件です。Cubase正式実測は0/2であり、この機械検証だけで#35や#3をcloseしません。
+隔離offline release buildと既存の凍結guardはbyte単位で一致し、SHA-256は引き続き`a2d5e521b0df561c6d0a350ea557cf87c2d53c160be2a3e94080ed2418e015c4`です。全Rust target、校正checker、final checkerのcontract、sampling runnerの偽成功拒否、Finder parserの回帰テストを確認しました。実測の成功を、未確認のcontextへ自動で広げません。操作ツール実装・権限・表示条件の最終照合、およびformal runへのclean commit / inventoryの結び付けは別の残件です。Cubase正式実測は0/2であり、この機械検証だけで#35や#3をcloseしません。
+
+### 同日: automationの起動条件差を再採取で解消
+
+旧automationだけがNode parent / pipeだったため、その6操作全体を、他の実測と同じ権限付きshell / PTY・guard起動前3秒待機の独立processで再採取しました。固定Finder open helperはguard起動前に準備した別processであり、guardのparentではありません。captureは継続中のSky clientによるfull AXと同一responseの画像、UI操作はdocumented CUA Finder APIです。release guardは変更していません。
+
+採用候補の新automationは6操作すべてで前後条件が成立し、14連続guard record、各resultの全16 delta 0、正常finish、exit 0、空stderrを確認しました。残り7 bundleと新規directoryで再結合し、80 file・8 distinct identity・実測14/14・決定的12/12をv4 checkerで再検証してexit 0でした。旧automationも原本のまま保持しています。最初の検証用copyではtraceのファイル名が非canonicalでcheckerが拒否したため、copy側の名前だけを修正し、元bytesと名前対応のprovenanceを別途保存しました。
+
+この再採取の前に中止した2 processは未採用です。1つは会話継続をまたいだarmed windowをUI操作前にcancelし、もう1つは2操作目でFinderが以前のpathを復元して、事前に定めた「空欄」という事後条件と不一致になり、clean result保存後にrejectしました。成功actionの切り出し・接合はしていません。新processでは履歴復元を踏まえた前後条件を実行前に固定し、set-valueで別の専用subfolder pathへの変化を確認しました。原本、失敗記録、実行前plan、画像、copy provenance、checker reportはすべてローカルのみ保存します。この結果で解消したのは既知のguard起動元の差であり、exact-context全体の最終採用や#32の根本原因特定を意味しません。
 
 `no_retry_within_process`は**同じguardプロセス内で再試行しない**という契約です。別プロセスの失敗で、既に完全に終了した独立プロセスの記録まで自動的に無効にはしません。ただし共通のbinary、操作ツール、起動条件、時刻の信頼性などに問題が判明した場合は、影響する全記録を再評価します。
 

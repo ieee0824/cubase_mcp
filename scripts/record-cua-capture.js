@@ -89,6 +89,9 @@ function parseCapture(input) {
         Buffer.byteLength(capture.app, 'utf8') > MAX_APP_BYTES) fail('app must be a bounded non-empty string')
     if (typeof capture.text !== 'string' || Buffer.byteLength(capture.text, 'utf8') === 0 ||
         Buffer.byteLength(capture.text, 'utf8') > MAX_STATE_BYTES) fail('text must be a bounded non-empty string')
+    if (capture.text.startsWith('The following is a diff from the previous accessibility tree')) {
+        fail('text must be a full AX capture, not an accessibility diff')
+    }
     if (!isRfc3339Timestamp(capture.captured_at)) {
         fail('captured_at must be an RFC 3339 timestamp with milliseconds')
     }

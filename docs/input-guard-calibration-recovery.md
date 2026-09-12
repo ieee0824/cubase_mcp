@@ -71,6 +71,16 @@ node scripts/record-cua-capture.js \
 
 この補助はguard結果、freshness、target binding、physical input、またはpostconditionを証明しません。`arm`後のstate保存はUIへinputを注入しないローカルI/Oとして行い、Computer Useのsingle target-bound callを置き換えたり、別のUI callを追加したりしません。
 
+#### ローカルSDKからの取得・受け渡し
+
+操作経路として`@oai/sky`の利用を許可された環境では、`sky.get_app_state({ app: "Finder", disableDiff: true })`で得た同じresponseの`text`と`screenshot.url`を使用できます。後者は観測済み環境ではローカル画像のfile URLです。URLを再構築せず、返されたURLのbytesを読み、base64として記録器へ渡します。画面やAXの再取得で片方だけを差し替えません。`captured_at`はこの取得call完了時のoperator側時刻を記録します。
+
+このSDKのoption名は`disableDiff`です。`cua_repl`の`disableDiffing`と混同すると差分が返ることがあります。保存前に対象windowと全文の構造を確認してください。記録器も観測済みの`The following is a diff from the previous accessibility tree`で始まる差分を拒否しますが、あらゆるAX形式の完全性を保証するparserではありません。差分から過去stateを合成してfresh full captureの代わりにしません。
+
+2026-09-12に専用Finder scratchで読み取りのみの受け渡しを確認しました。全文AXは`requireScratchWindow`を通り、保存後のtextは取得responseと一致し、JPEGも元bytesと一致しました。画像は71,052 bytes、`sips`でJPEG / 920×672としてデコードできました。保存stateのSHA-256は`7a32b3208ca0cf6560c98ad741db8fdbe304b2fee134d9d4fed79d04d9a132a7`、画像は`bbd08750a64e846850f251418fd6fc709df98adfa798dcf736ade976c144d668`です。差分だった先行captureは別directoryに不採用のまま保持しました。
+
+同日の自動校正は、sandbox内の事前起動が`COUNTER_UNAVAILABLE`で停止した後、権限付きの独立した2回のguard起動がどちらも最初のsampleで`KEY_HELD`を返し、exit status 1 / 空stderrで停止しました。`ready`、`armed`、UI入力へ進んでいません。これはcontrolledな物理押下区間を持つheld-state校正の合格ではなく、誰が何を押したかの判定でもありません。ユーザーへの入力依頼やsynthetic入力による代用はせず、校正全体・Cubase正式runは未完了のままです。
+
 ## operatorとの同期と進捗
 
 - 自動操作の準備が済んでから、対象の物理入力controlに対する現在の準備確認を得ます。過去の「準備OK」を新しい入力区間の確認に使いません。

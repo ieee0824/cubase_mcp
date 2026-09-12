@@ -165,6 +165,19 @@ test('rejects invalid timestamps before creating capture artifacts', () => {
     assert.equal(fs.existsSync(path.join(directory, 'screenshots')), false)
 })
 
+test('rejects the observed SDK accessibility diff instead of saving it as full state', () => {
+    const directory = temporaryDirectory()
+    const result = spawnSync(process.execPath, [recorder, '--output-directory', directory, '--capture-id', 'diff'], {
+        encoding: 'utf8',
+        input: JSON.stringify(capture({
+            text: 'The following is a diff from the previous accessibility tree for Window: "scratch" with ~ and + representing changed and added elements, respectively. Removed elements are summarized by ID range.\n~\t74 text changed'
+        }))
+    })
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /full AX capture, not an accessibility diff/)
+    assert.deepEqual(fs.readdirSync(directory), [])
+})
+
 test('fails closed instead of overwriting an existing capture id', () => {
     const directory = temporaryDirectory()
     run(directory, 'repeat', capture())

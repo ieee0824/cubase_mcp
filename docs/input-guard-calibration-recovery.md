@@ -1,8 +1,24 @@
 # 入力ガード校正の復旧手順
 
-これはTrack API調査用の操作手順であり、本番MCP機能ではありません。[校正matrix](track-api-fixture.md)の9プロセス・15操作、物理入力の確認、freshな前後stateと画像、guardの拒否条件を変更しません。校正だけではCubaseのTrack API対応を証明できません。
+これはTrack API調査用の操作手順であり、本番MCP機能ではありません。[校正matrix](track-api-fixture.md)の8プロセス・14操作と決定的なsampling contractテスト、物理入力の確認、freshな前後stateと画像、guardの拒否条件を変更しません。校正だけではCubaseのTrack API対応を証明できません。
 
 ## 再試行の単位
+
+### 2026-09-13: 受け入れ設計 v4
+
+ユーザー承認により、偶然の物理入力が短いsample内に重なることを必須とする旧sample-race controlを、決定的な異常系テストへ分離しました。これは旧15項目の最後を実測成功に変更したものではありません。新しい分母は実測14操作 / 8プロセスに、別枠のsampling contractテストを加えたものです。
+
+- 実機: automation、move-only、click/key/scroll/drag、wrong-target、held-stateの各既存条件を維持します。通常のOS入力カウンター取得・held検出・UI postconditionを確認します。
+- 決定的テスト: test buildに限りOS readの戻り値を置換し、実際のworker、sampling判定、command処理、error serializationを通します。arm/checkそれぞれで同値、変化、wraparound、key held、button held、raceとheldの優先順位の計12 caseを実行します。エラーコード自体を注入して成功扱いにはしません。
+- 境界: OS APIの原子性や、実機sample中の入力競合を再現・保証するテストではありません。runtimeの`INPUT_DURING_SAMPLE`拒否、timeout、held判定は維持し、sleep追加や本番への注入オプションは導入しません。
+- 校正reportはv4、operator calibration summaryはv2とします。`sampling_contract.runtime_physical_race_reproduced`は必ずfalseです。旧reportの書き換え、旧race失敗の再ラベル付けはしません。final checkerはcleanな同一commitのsource/lock/runner digestも照合します。
+- 既存8 bundleは原本のまま保持します。再利用には従来のexact-context確認とbinaryの一致が必要です。test-only変更でもreleaseの同一性を推測せず、隔離buildとのbyte/digest比較を行います。不一致なら旧guardのbundleを新guardの証拠にはしません。
+
+単独の実行は`bash scripts/check-input-guard-sampling.sh`です。校正checkerが同じrunnerを毎回実行して結果をreportに含めるため、証拠directoryに置いたpass JSONでは代替できません。Cargoの依存は事前取得し、実行時は`--offline --locked`を使います。final checkerでは同じ検証呼出しの隔離target directoryでtest executableも再buildします。Rust toolchainとCargo home configurationは従来どおり信頼境界です。
+
+同日の移行検証では、完了済み8 bundleの80 file（24 process fileと28+28 capture）を別の候補directoryへexclusive copyし、元とcopyのbyte/digest一致、8 distinct identity、時刻、capture、各controlの条件をv4 checkerで一括検証しました。実測14/14と決定的12/12は機械検証済みです。旧race失敗、各bundleの旧report、copy provenance、原本はrepository外に保持しています。
+
+隔離offline release buildと既存の凍結guardはbyte単位で一致し、SHA-256は引き続き`a2d5e521b0df561c6d0a350ea557cf87c2d53c160be2a3e94080ed2418e015c4`です。全Rust target、校正checker、final checkerのcontract、sampling runnerの偽成功拒否、Finder parserの回帰テストを確認しました。実測の成功を、未確認のcontextへ自動で広げません。automation bundleのNode parent / pipeとphysical bundleのshell / PTY等の起動差、操作ツール実装・権限・表示条件の最終照合、およびformal runへのclean commit / inventoryの結び付けは別の残件です。Cubase正式実測は0/2であり、この機械検証だけで#35や#3をcloseしません。
 
 `no_retry_within_process`は**同じguardプロセス内で再試行しない**という契約です。別プロセスの失敗で、既に完全に終了した独立プロセスの記録まで自動的に無効にはしません。ただし共通のbinary、操作ツール、起動条件、時刻の信頼性などに問題が判明した場合は、影響する全記録を再評価します。
 
@@ -16,11 +32,11 @@
 1. 採取プロセスが終了していることを実process handle等で確認します。観測timeoutやlockの存在だけで終了と判断しません。
 2. 同じguard binary SHA-256と、同じ操作ツール実装・起動権限・表示/fixture条件で得た記録であることを確認します。由来が不明、またはtool update等でcontextが変わった場合は、互換性を推測して再利用しません。guardのSHAだけではexact-context一致を証明できません。
 3. bundleごとに元directory、stem、guard identity、全参照fileの相対pathとSHA-256、採用理由をlocal provenance記録へ残します。元directoryの失敗原因がそのbundleにも影響する場合は採用しません。
-4. 9つの完全なbundleを、元とは別の新規final directoryへ**byte-for-byteでcopy**します。既存fileを上書きせず、canonical名とtrace内の相対pathを維持します。symlinkやhardlinkは使いません。名前・captureの衝突は修正して通さず、採用元の選択を見直します。
+4. 8つの完全なbundleを、元とは別の新規final directoryへ**byte-for-byteでcopy**します。既存fileを上書きせず、canonical名とtrace内の相対pathを維持します。symlinkやhardlinkは使いません。名前・captureの衝突は修正して通さず、採用元の選択を見直します。
 5. 元とcopyのdigest一致を再確認します。provenance、失敗記録、checker出力はfinal directoryの外へ置きます。元の失敗記録は隔離保存したままです。
-6. repositoryの`scripts/check-input-guard-calibration.sh`へfinal directory、prefix、guard binary、固定したguard SHAを渡して検証します。9 distinct identity、各プロセス内のno-retry、guard/traceの完全性、時刻、30+30 captureとdigest、closed setなどの既存検査をすべて通すことが必要です。
+6. repositoryの`scripts/check-input-guard-calibration.sh`へfinal directory、prefix、guard binary、固定したguard SHAを渡して検証します。checkerは同じrepositoryの`check-input-guard-sampling.sh`も実行し、自己申告のpass記録では代替しません。8 distinct identity、各プロセス内のno-retry、guard/traceの完全性、時刻、28+28 captureとdigest、closed setなどの既存検査をすべて通すことが必要です。
 
-bundleのコピーは校正の合格ではありません。checkerは操作ツールの実装versionや実際の対象画面を認証しないため、手順2のcontext照合と、実測時の画像・操作固有postcondition確認を省略できません。校正時の取得元が別directoryであることだけを理由に、全9プロセスを再実行する必要はありません。
+bundleのコピーは校正の合格ではありません。checkerは操作ツールの実装versionや実際の対象画面を認証しないため、手順2のcontext照合と、実測時の画像・操作固有postcondition確認を省略できません。校正時の取得元が別directoryであることだけを理由に、全8プロセスを再実行する必要はありません。
 
 ## UI判定を先にオフライン検証する
 
@@ -95,7 +111,7 @@ SDK headerの`CGEventSourceKeyState` / state IDとRustのFFI型・定数に不�
 
 - 自動操作の準備が済んでから、対象の物理入力controlに対する現在の準備確認を得ます。過去の「準備OK」を新しい入力区間の確認に使いません。
 - 各controlの入力内容、開始、終了を明示します。見落としやtiming違いがあれば、そのcontrolのプロセスは未成立として残します。ユーザーの操作ミスと断定しません。
-- 「部分確認済みaction数 / 15」「完全bundle数 / 9」「校正全体の合否」と「採用済みCubase実測数 / 2」を分けて表示します。工程数を作業量の割合に換算しません。
+- 「部分確認済み実測action数 / 14」「完全bundle数 / 8」「決定的テスト結果」「校正全体の合否」と「採用済みCubase実測数 / 2」を分けて表示します。工程数を作業量の割合に換算しません。
 - 同じoperator手順または判定コードの問題を検出したらlive再試行を止め、原因をオフラインで再現・修正してから再開します。
 
 Input / Outputを含むIssue #3の元scopeはこの手順では変更しません。primary profileのO1 skip、校正完了、基盤PRのCI成功だけを根拠にIssueをcloseしません。

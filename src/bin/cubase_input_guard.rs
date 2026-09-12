@@ -1,10 +1,10 @@
 use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 use std::sync::mpsc;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 use std::thread;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,7 +18,7 @@ const GUARD_PRIVACY: &str = "counts_and_held_state_boolean";
 const GUARD_POLICY: &str = "consequential_input_only";
 const MAX_COMMAND_BYTES: usize = 512;
 const MAX_ACTION_ID_BYTES: usize = 128;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 const COUNTER_READ_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
@@ -718,7 +718,7 @@ fn run(output: &mut GuardOutput) -> Result<(), GuardError> {
     ))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn sample_input_counters() -> Result<InputCounters, GuardError> {
     let (sender, receiver) = mpsc::sync_channel(1);
     thread::Builder::new()
@@ -756,7 +756,7 @@ fn sample_input_counters() -> Result<InputCounters, GuardError> {
     Ok(state.counters)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(test)))]
 fn sample_input_counters() -> Result<InputCounters, GuardError> {
     Err(GuardError::new(
         "NOT_SUPPORTED",
@@ -774,7 +774,7 @@ fn counter_source_supported() -> bool {
     false
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 struct InputStateRead {
     aggregate_before: u32,
     aggregate_after: u32,
@@ -783,7 +783,7 @@ struct InputStateRead {
     counters: InputCounters,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 fn read_input_state_unchecked() -> InputStateRead {
     const HID_SYSTEM_STATE: i32 = 1;
     const ANY_INPUT: u32 = u32::MAX;
@@ -850,7 +850,7 @@ fn read_input_state_unchecked() -> InputStateRead {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     fn CGEventSourceCounterForEventType(state_id: i32, event_type: u32) -> u32;
@@ -858,11 +858,103 @@ unsafe extern "C" {
     fn CGEventSourceButtonState(state_id: i32, button: u32) -> bool;
 }
 
+// Only the OS read boundary is replaced in test builds. The real sampling
+// worker, validation, command handling, and error serialization still run.
+// There is no production flag, delay, or runtime injection facility.
+#[cfg(test)]
+static SCRIPTED_INPUT_STATE: std::sync::Mutex<Option<InputStateRead>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn read_input_state_unchecked() -> InputStateRead {
+    SCRIPTED_INPUT_STATE
+        .lock()
+        .expect("scripted input lock")
+        .take()
+        .expect("deterministic test must supply exactly one OS read")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
     use std::io::Cursor;
+
+    #[test]
+    fn deterministic_sampling_contract() {
+        // A single serialized test owns the one-shot OS-read substitute.
+        // Error codes are NOT injected: the production sampler derives them.
+        let cases = [
+            (100, 100, false, false, None),
+            (100, 101, false, false, Some("INPUT_DURING_SAMPLE")),
+            (u32::MAX, 0, false, false, Some("INPUT_DURING_SAMPLE")),
+            (100, 100, true, false, Some("KEY_HELD")),
+            (100, 100, false, true, Some("MOUSE_BUTTON_HELD")),
+            (100, 101, true, true, Some("INPUT_DURING_SAMPLE")),
+        ];
+        let mut executed_cases = 0;
+        for phase in ["arm", "check"] {
+            for (before, after, key_held, mouse_button_held, expected_error) in cases {
+                let mut state = GuardState::new();
+                if phase == "check" {
+                    state
+                        .handle(
+                            Command::Arm {
+                                action_id: "contract".into(),
+                            },
+                            counters(0, 0),
+                        )
+                        .unwrap();
+                }
+                *SCRIPTED_INPUT_STATE.lock().unwrap() = Some(InputStateRead {
+                    aggregate_before: before,
+                    aggregate_after: after,
+                    key_held,
+                    mouse_button_held,
+                    counters: counters(7, 0),
+                });
+                let command = if phase == "arm" {
+                    Command::Arm {
+                        action_id: "contract".into(),
+                    }
+                } else {
+                    Command::Check {
+                        action_id: "contract".into(),
+                    }
+                };
+                let outcome =
+                    handle_command_with_sampler(&mut state, command, sample_input_counters_timed);
+                assert!(SCRIPTED_INPUT_STATE.lock().unwrap().is_none());
+                if let Some(code) = expected_error {
+                    let error = outcome.unwrap_err();
+                    assert_eq!(error.code, code);
+                    let record = error.as_json();
+                    assert_eq!(record["type"], "error");
+                    assert_eq!(record["command"], phase);
+                    assert_eq!(record["action_id"], "contract");
+                    assert_eq!(record["error"]["code"], code);
+                    let start = record["sample_started_at_unix_ms"].as_u64().unwrap();
+                    let end = record["sample_completed_at_unix_ms"].as_u64().unwrap();
+                    assert!(start > 0 && start <= end);
+                    // A failed arm must not arm; a failed check must not close
+                    // the window as a clean result. main treats Err as terminal.
+                    assert_eq!(state.armed.is_some(), phase == "check");
+                } else {
+                    let record = outcome.unwrap();
+                    assert_eq!(
+                        record["type"],
+                        if phase == "arm" { "armed" } else { "result" }
+                    );
+                    if phase == "check" {
+                        assert_eq!(record["deltas"]["mouse_moved"], 7);
+                        assert_eq!(record["interference_detected"], false);
+                    }
+                }
+                executed_cases += 1;
+            }
+        }
+        assert_eq!(executed_cases, 12);
+        println!("CMCP_SAMPLING_CONTRACT_V1_PASS");
+    }
 
     fn counters(mouse_moved: u32, key_down: u32) -> InputCounters {
         InputCounters {

@@ -112,12 +112,9 @@ WRONG_TRACE=$(path_for wrong-target-trace jsonl)
 HELD_GUARD=$(path_for held-state-rejection jsonl)
 HELD_STDERR=$(path_for held-state-rejection stderr)
 HELD_TRACE=$(path_for held-state-rejection-trace jsonl)
-SAMPLE_RACE_GUARD=$(path_for sample-race-rejection jsonl)
-SAMPLE_RACE_STDERR=$(path_for sample-race-rejection stderr)
-SAMPLE_RACE_TRACE=$(path_for sample-race-rejection-trace jsonl)
 
 # A calibration directory is a closed evidence set: exactly three records for
-# each of nine canonical guard processes plus screenshot and state directories.
+# each of eight canonical guard processes plus screenshot and state directories.
 # Rejecting extras prevents a failed or retried run from being hidden beside the
 # selected evidence.
 entry_count=0
@@ -132,8 +129,7 @@ while IFS= read -r -d '' entry; do
     "$FILE_PREFIX-positive-scroll.jsonl"|"$FILE_PREFIX-positive-scroll.stderr"|"$FILE_PREFIX-positive-scroll-trace.jsonl"|\
     "$FILE_PREFIX-positive-drag.jsonl"|"$FILE_PREFIX-positive-drag.stderr"|"$FILE_PREFIX-positive-drag-trace.jsonl"|\
     "$FILE_PREFIX-wrong-target.jsonl"|"$FILE_PREFIX-wrong-target.stderr"|"$FILE_PREFIX-wrong-target-trace.jsonl"|\
-    "$FILE_PREFIX-held-state-rejection.jsonl"|"$FILE_PREFIX-held-state-rejection.stderr"|"$FILE_PREFIX-held-state-rejection-trace.jsonl"|\
-    "$FILE_PREFIX-sample-race-rejection.jsonl"|"$FILE_PREFIX-sample-race-rejection.stderr"|"$FILE_PREFIX-sample-race-rejection-trace.jsonl")
+    "$FILE_PREFIX-held-state-rejection.jsonl"|"$FILE_PREFIX-held-state-rejection.stderr"|"$FILE_PREFIX-held-state-rejection-trace.jsonl")
       test -f "$entry" || die "canonical calibration artifact is not a regular file: $entry"
       test ! -L "$entry" || die "symbolic links are not accepted in calibration evidence: $entry"
       ;;
@@ -144,22 +140,22 @@ while IFS= read -r -d '' entry; do
     *) die "unexpected calibration artifact: $entry_name" ;;
   esac
 done < <(find "$CALIBRATION_DIRECTORY" -mindepth 1 -maxdepth 1 -print0)
-test "$entry_count" -eq 29 || die "calibration directory must contain 27 canonical files, screenshots/, and states/ (found $entry_count entries)"
+test "$entry_count" -eq 26 || die "calibration directory must contain 24 canonical files, screenshots/, and states/ (found $entry_count entries)"
 
 GUARD_FILES=(
   "$AUTOMATION_GUARD" "$MOVE_GUARD"
   "$CLICK_GUARD" "$KEY_GUARD" "$SCROLL_GUARD" "$DRAG_GUARD"
-  "$WRONG_GUARD" "$HELD_GUARD" "$SAMPLE_RACE_GUARD"
+  "$WRONG_GUARD" "$HELD_GUARD"
 )
 TRACE_FILES=(
   "$AUTOMATION_TRACE" "$MOVE_TRACE"
   "$CLICK_TRACE" "$KEY_TRACE" "$SCROLL_TRACE" "$DRAG_TRACE"
-  "$WRONG_TRACE" "$HELD_TRACE" "$SAMPLE_RACE_TRACE"
+  "$WRONG_TRACE" "$HELD_TRACE"
 )
 STDERR_FILES=(
   "$AUTOMATION_STDERR" "$MOVE_STDERR"
   "$CLICK_STDERR" "$KEY_STDERR" "$SCROLL_STDERR" "$DRAG_STDERR"
-  "$WRONG_STDERR" "$HELD_STDERR" "$SAMPLE_RACE_STDERR"
+  "$WRONG_STDERR" "$HELD_STDERR"
 )
 
 for file in "${GUARD_FILES[@]}" "${TRACE_FILES[@]}"; do
@@ -229,12 +225,12 @@ SCREENSHOT_REFS=$(jq -sc '
     {path: .post_state.screenshot_path, sha256: .post_state.screenshot_sha256}]
 ' "${TRACE_FILES[@]}")
 jq -e '
-  length == 30 and
+  length == 28 and
   all(.[];
     (.path | type == "string" and test("^screenshots/[A-Za-z0-9][A-Za-z0-9._-]*\\.(png|jpg|jpeg)$")) and
     (.sha256 | type == "string" and test("^[0-9a-f]{64}$"))
   ) and
-  ((map(.path) | unique | length) == 30)
+  ((map(.path) | unique | length) == 28)
 ' <<<"$SCREENSHOT_REFS" >/dev/null || die "every calibration action must name two unique canonical screenshot files"
 
 screenshot_count=0
@@ -247,7 +243,7 @@ while IFS= read -r -d '' screenshot; do
   expected_sha=$(jq -er --arg path "$relative_path" '.[] | select(.path == $path) | .sha256' <<<"$SCREENSHOT_REFS") || die "extra screenshot not referenced by a trace: $relative_path"
   test "$(sha256_file "$screenshot")" = "$expected_sha" || die "screenshot digest mismatch: $relative_path"
 done < <(find "$CALIBRATION_DIRECTORY/screenshots" -mindepth 1 -maxdepth 1 -print0)
-test "$screenshot_count" -eq 30 || die "screenshots directory must contain exactly the 30 trace-bound files (found $screenshot_count)"
+test "$screenshot_count" -eq 28 || die "screenshots directory must contain exactly the 28 trace-bound files (found $screenshot_count)"
 
 STATE_REFS=$(jq -sc '
   [.[] | select(.record_type == "action") |
@@ -255,14 +251,14 @@ STATE_REFS=$(jq -sc '
     {path: .post_state.state_path, sha256: .post_state.state_sha256, captured_at: .post_state.captured_at, app: .post_state.app}]
 ' "${TRACE_FILES[@]}")
 jq -e '
-  length == 30 and
+  length == 28 and
   all(.[];
     (.path | type == "string" and test("^states/[A-Za-z0-9][A-Za-z0-9._-]*\\.json$")) and
     (.sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
     (.captured_at | type == "string" and length > 0) and
     (.app | type == "string" and length > 0)
   ) and
-  ((map(.path) | unique | length) == 30)
+  ((map(.path) | unique | length) == 28)
 ' <<<"$STATE_REFS" >/dev/null || die "every calibration action must name two unique canonical JSON state dumps"
 
 state_count=0
@@ -287,7 +283,7 @@ while IFS= read -r -d '' state_dump; do
   test "$(jq -sr '.[0].captured_at | select(type == "string")' "$state_dump")" = "$expected_captured_at" || die "state dump captured_at does not match trace: $relative_path"
   test "$(jq -sr '.[0].app | select(type == "string")' "$state_dump")" = "$expected_app" || die "state dump application does not match trace: $relative_path"
 done < <(find "$CALIBRATION_DIRECTORY/states" -mindepth 1 -maxdepth 1 -print0)
-test "$state_count" -eq 30 || die "states directory must contain exactly the 30 trace-bound files (found $state_count)"
+test "$state_count" -eq 28 || die "states directory must contain exactly the 28 trace-bound files (found $state_count)"
 
 validate_guard_identity() {
   local guard_file=$1
@@ -365,17 +361,17 @@ while test "$index" -lt "${#GUARD_FILES[@]}"; do
 done
 
 # Freshness is derived from the canonical ready records, not from operator trace
-# booleans. PID, start time, and session correlation ID must all identify nine
+# booleans. PID, start time, and session correlation ID must all identify eight
 # distinct processes, and each stream has already been checked for identity
 # continuity above.
 jq -s -e '
   [.[] | select(.type == "ready")] as $ready |
-  ($ready | length) == 9 and
-  (([$ready[].guard_session_id] | unique | length) == 9) and
-  (([$ready[].guard_process_id] | unique | length) == 9) and
-  (([$ready[].guard_started_at_unix_ms] | unique | length) == 9) and
-  (([$ready[] | [.guard_session_id, .guard_process_id, .guard_started_at_unix_ms]] | unique | length) == 9)
-' "${GUARD_FILES[@]}" >/dev/null || die "canonical guard records do not prove nine distinct fresh process identities"
+  ($ready | length) == 8 and
+  (([$ready[].guard_session_id] | unique | length) == 8) and
+  (([$ready[].guard_process_id] | unique | length) == 8) and
+  (([$ready[].guard_started_at_unix_ms] | unique | length) == 8) and
+  (([$ready[] | [.guard_session_id, .guard_process_id, .guard_started_at_unix_ms]] | unique | length) == 8)
+' "${GUARD_FILES[@]}" >/dev/null || die "canonical guard records do not prove eight distinct fresh process identities"
 
 validate_guarded_action_windows() {
   local guard_file=$1
@@ -747,42 +743,6 @@ jq -s -e --slurpfile guard "$HELD_GUARD" '
   .[2].terminal_guard_error == $code and .[2].no_retry_within_process == true
 ' "$HELD_TRACE" >/dev/null || die "held-state rejection trace invalid"
 
-jq -s -e '
-  def unix_ms: type == "number" and . > 0 and floor == .;
-  length == 2 and
-  .[0].type == "ready" and .[0].source == "hid_system_state" and .[0].privacy == "counts_and_held_state_boolean" and
-  .[1].type == "error" and .[1].error.code == "INPUT_DURING_SAMPLE" and
-  .[1].command == "arm" and .[1].action_id == "cal.sample-race-rejection" and
-  (.[1].sample_started_at_unix_ms | unix_ms) and (.[1].sample_completed_at_unix_ms | unix_ms) and
-  .[1].sample_started_at_unix_ms <= .[1].sample_completed_at_unix_ms and
-  .[1].sample_completed_at_unix_ms <= .[1].recorded_at_unix_ms
-' "$SAMPLE_RACE_GUARD" >/dev/null || die "sample-race rejection guard stream invalid"
-
-jq -s -e --slurpfile guard "$SAMPLE_RACE_GUARD" '
-  def hex64: type == "string" and test("^[0-9a-f]{64}$");
-  def nonempty: type == "string" and length > 0;
-  def timestamp: type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}(Z|[+-][0-9]{2}:[0-9]{2})$");
-  length == 3 and
-  .[0].record_type == "session" and .[0].control == "sample_race_rejection" and
-  (.[0].session_id | nonempty) and (.[0].started_at | timestamp) and
-  .[1].record_type == "action" and .[1].session_id == .[0].session_id and
-  .[1].action_id == "cal.sample-race-rejection" and .[1].api == "physical_input" and .[1].injected_call_count == 0 and
-  .[1].guard_command_phase == "arm" and .[1].mode == "sample_race" and
-  .[1].physical_input.kind == "pointer_move_during_sample" and
-  .[1].physical_input.operator_attested == true and .[1].physical_input.continuous_during_arm_sample == true and
-  .[1].guard.ready_observed == true and .[1].guard.armed_observed == false and
-  .[1].guard.observed_error == "INPUT_DURING_SAMPLE" and
-  .[1].pre_state.fresh == true and .[1].pre_state.expected_condition_confirmed == true and
-  (.[1].pre_state.state_sha256 | hex64) and (.[1].pre_state.screenshot_sha256 | hex64) and (.[1].pre_state.app | nonempty) and
-  .[1].post_state.fresh == true and .[1].post_state.expected_condition_confirmed == true and
-  (.[1].post_state.state_sha256 | hex64) and (.[1].post_state.screenshot_sha256 | hex64) and
-  .[1].pre_state.app == "Finder" and .[1].post_state.app == "Finder" and
-  .[1].no_retry_within_process == true and (.[1].timestamp | timestamp) and
-  .[2].record_type == "session_end" and .[2].session_id == .[0].session_id and
-  (.[2].ended_at | timestamp) and .[2].guard_process_exit_status == 1 and
-  .[2].terminal_guard_error == "INPUT_DURING_SAMPLE" and .[2].no_retry_within_process == true
-' "$SAMPLE_RACE_TRACE" >/dev/null || die "sample-race rejection trace invalid"
-
 validate_guarded_action_windows "$AUTOMATION_GUARD" "$AUTOMATION_TRACE" 6
 validate_guarded_action_windows "$MOVE_GUARD" "$MOVE_TRACE" 2
 validate_guarded_action_windows "$CLICK_GUARD" "$CLICK_TRACE" 1
@@ -791,11 +751,10 @@ validate_guarded_action_windows "$SCROLL_GUARD" "$SCROLL_TRACE" 1
 validate_guarded_action_windows "$DRAG_GUARD" "$DRAG_TRACE" 1
 validate_guarded_action_windows "$WRONG_GUARD" "$WRONG_TRACE" 1
 validate_sampling_rejection_window "$HELD_GUARD" "$HELD_TRACE"
-validate_sampling_rejection_window "$SAMPLE_RACE_GUARD" "$SAMPLE_RACE_TRACE"
 
 EVIDENCE='{}'
 SESSIONS='{}'
-for name in automation move positive-click positive-key positive-scroll positive-drag wrong-target held-state-rejection sample-race-rejection; do
+for name in automation move positive-click positive-key positive-scroll positive-drag wrong-target held-state-rejection; do
   guard_file=$(path_for "$name" jsonl)
   stderr_file=$(path_for "$name" stderr)
   trace_file=$(path_for "$name-trace" jsonl)
@@ -820,6 +779,8 @@ done
 HELD_REJECTION_ERROR=$(jq -rs '.[1].error.code' "$HELD_GUARD")
 HELD_REJECTION_KIND=$(jq -rs '.[1].physical_input.kind' "$HELD_TRACE")
 CHECKER_SHA=$(sha256_file "$0")
+# Physical artifacts and deterministic logic are separate evidence domains.
+SAMPLING_REPORT=$(bash "$(dirname "$0")/check-input-guard-sampling.sh")
 
 jq -n \
   --arg prefix "$FILE_PREFIX" \
@@ -827,10 +788,11 @@ jq -n \
   --arg checker_sha256 "$CHECKER_SHA" \
   --arg held_rejection_error "$HELD_REJECTION_ERROR" \
   --arg held_rejection_kind "$HELD_REJECTION_KIND" \
+  --argjson sampling_report "$SAMPLING_REPORT" \
   --argjson evidence "$EVIDENCE" \
   --argjson sessions "$SESSIONS" \
   '{
-    calibration_report_version: 3,
+    calibration_report_version: 4,
     status: "valid",
     file_prefix: $prefix,
     guard_contract: {
@@ -842,6 +804,7 @@ jq -n \
       binary_sha256: $guard_binary_sha256
     },
     checker_sha256: $checker_sha256,
+    sampling_contract: $sampling_report,
     controls: {
       automation_negative: ["exec_command.open","computer_use.press_key","computer_use.set_value","computer_use.click.element","computer_use.click.coordinate.single","computer_use.click.coordinate.double"],
       move_only_acceptance: ["semantic_target_binding","coordinate_target_binding"],
@@ -852,17 +815,14 @@ jq -n \
         error_code: $held_rejection_error,
         physical_input_kind: $held_rejection_kind
       },
-      sample_race_rejection: {
-        mode: "sample_race",
-        error_code: "INPUT_DURING_SAMPLE",
-        physical_input_kind: "pointer_move_during_sample"
-      }
+      sampling_contract: {mode:"deterministic_os_read_substitution",error_code:"INPUT_DURING_SAMPLE",runtime_physical_race_reproduced:false}
     },
-    fresh_guard_identity_count: 9,
+    fresh_guard_identity_count: 8,
     all_pre_post_artifact_digests_recomputed: true,
     guard_sessions: $sessions,
     evidence_sha256: $evidence,
     limitations: [
+      "physical controls validate OS input observations; deterministic sampling tests do not reproduce a hardware race or measure its probability",
       "guard session identity fields correlate records; they do not authenticate the actor or make the JSONL tamper-evident",
       "time-binding between guard records and operator traces assumes a trustworthy shared system wall clock"
     ]

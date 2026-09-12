@@ -7,9 +7,9 @@ EXPECTED_TRACE_RECORD_COUNT=$((EXPECTED_ACTION_COUNT + 2))
 EXPECTED_CAPTURE_COUNT=$((EXPECTED_ACTION_COUNT * 2))
 EXPECTED_CLICK_ACTION_COUNT=46
 EXPECTED_ACTIVATION_ACTION_COUNT=7
-# The detached index has 101 non-formal-capture entries. Each formal action
+# The detached index has 94 non-formal-capture entries (14 + 24 + 56). Each formal action
 # contributes two screenshots and two state dumps.
-EXPECTED_NON_CAPTURE_INDEX_ENTRY_COUNT=101
+EXPECTED_NON_CAPTURE_INDEX_ENTRY_COUNT=94
 EXPECTED_DETACHED_INDEX_COUNT=$((EXPECTED_NON_CAPTURE_INDEX_ENTRY_COUNT + EXPECTED_ACTION_COUNT * 4))
 CALIBRATION_PREFIX='cmcp-calibration'
 EXPECTED_ACTIVATION_DIALOG_TEXT='プロジェクトをアクティブにしますか？'
@@ -869,9 +869,9 @@ jq -e \
     .input_guard.all_consequential_deltas_zero == true and .input_guard.no_error_cancel_reject_or_latch == true and
     .input_guard.successful_finish_after_collector_summary == true and
     (.input_guard.calibration | keys | sort) ==
-      (["artifact_paths","exact_automation_context_negative_matrix","held_state_rejection","physical_click_rejection","physical_drag_rejection","physical_key_rejection","physical_move_only_acceptance","physical_scroll_rejection","sample_race_rejection","wrong_coordinate_clean_guard_but_failed_postcondition_rejection"] | sort) and
+      (["artifact_paths","exact_automation_context_negative_matrix","held_state_rejection","physical_click_rejection","physical_drag_rejection","physical_key_rejection","physical_move_only_acceptance","physical_scroll_rejection","deterministic_sampling_contract","wrong_coordinate_clean_guard_but_failed_postcondition_rejection"] | sort) and
     all(.input_guard.calibration | to_entries[] | select(.key != "artifact_paths"); .value == "passed") and
-    (.input_guard.calibration.artifact_paths | type == "array" and length == 87 and
+    (.input_guard.calibration.artifact_paths | type == "array" and length == 80 and
       all(.[]; type == "string" and test("^calibration/[A-Za-z0-9][A-Za-z0-9._/-]*$") and (contains("..") | not)) and
       (unique | length) == length and (sort == $calibration_artifact_paths)) and
     .checkpoint_execution.expected_order == ($manifest[0].annotations | map(.checkpoint_id)) and
@@ -931,11 +931,16 @@ trap cleanup_temporary_files EXIT HUP INT TERM
 # Trust checks above intentionally precede this execution. Execute the
 # repository trust-root path itself so a later change to the writable evidence
 # copy cannot create a check/use race.
-bash "$TRUSTED_CALIBRATION_CHECKER" "$CALIBRATION_DIRECTORY" "$CALIBRATION_PREFIX" "$GUARD_BINARY" "$EXPECTED_GUARD_SHA" > "$CALIBRATION_TMP"
+# Compile deterministic tests in this invocation's isolated build directory as
+# well; do not use a pre-existing target/debug test executable as final evidence.
+CARGO_TARGET_DIR="$REPRO_BUILD_DIRECTORY" bash "$TRUSTED_CALIBRATION_CHECKER" "$CALIBRATION_DIRECTORY" "$CALIBRATION_PREFIX" "$GUARD_BINARY" "$EXPECTED_GUARD_SHA" > "$CALIBRATION_TMP"
 jq -s -e \
-  --arg guard_sha "$EXPECTED_GUARD_SHA" --arg checker_sha "$TRUSTED_CALIBRATION_CHECKER_SHA" '
+  --arg guard_sha "$EXPECTED_GUARD_SHA" --arg checker_sha "$TRUSTED_CALIBRATION_CHECKER_SHA" \
+  --arg sampling_source_sha "$(sha256_file "$REPOSITORY_ROOT/src/bin/cubase_input_guard.rs")" \
+  --arg sampling_lock_sha "$(sha256_file "$REPOSITORY_ROOT/Cargo.lock")" \
+  --arg sampling_checker_sha "$(sha256_file "$REPOSITORY_ROOT/scripts/check-input-guard-sampling.sh")" '
     length == 1 and (.[0] |
-    .calibration_report_version == 3 and .status == "valid" and .file_prefix == "cmcp-calibration" and
+    .calibration_report_version == 4 and .status == "valid" and .file_prefix == "cmcp-calibration" and
     .guard_contract == {
       version:5, source:"hid_system_state", coverage:"action_windows",
       privacy:"counts_and_held_state_boolean", policy:"consequential_input_only", binary_sha256:$guard_sha
@@ -951,9 +956,16 @@ jq -s -e \
     (if .controls.held_state_rejection.error_code == "KEY_HELD" then
        .controls.held_state_rejection.physical_input_kind == "keyboard_key_held"
      else .controls.held_state_rejection.physical_input_kind == "mouse_button_held" end) and
-    .controls.sample_race_rejection == {mode:"sample_race",error_code:"INPUT_DURING_SAMPLE",physical_input_kind:"pointer_move_during_sample"} and
-    .fresh_guard_identity_count == 9 and (.guard_sessions | length) == 9 and
-    (.evidence_sha256 | keys | sort) == (["automation","held-state-rejection","move","positive-click","positive-drag","positive-key","positive-scroll","sample-race-rejection","wrong-target"] | sort) and
+    .controls.sampling_contract == {mode:"deterministic_os_read_substitution",error_code:"INPUT_DURING_SAMPLE",runtime_physical_race_reproduced:false} and
+    .sampling_contract.sampling_contract_report_version == 1 and .sampling_contract.status == "passed" and
+    .sampling_contract.mode == "deterministic_os_read_substitution" and .sampling_contract.cases == 12 and
+    .sampling_contract.test == "tests::deterministic_sampling_contract" and
+    .sampling_contract.runtime_physical_race_reproduced == false and
+    .sampling_contract.source_sha256 == $sampling_source_sha and
+    .sampling_contract.cargo_lock_sha256 == $sampling_lock_sha and
+    .sampling_contract.checker_sha256 == $sampling_checker_sha and
+    .fresh_guard_identity_count == 8 and (.guard_sessions | length) == 8 and
+    (.evidence_sha256 | keys | sort) == (["automation","held-state-rejection","move","positive-click","positive-drag","positive-key","positive-scroll","wrong-target"] | sort) and
     all(.evidence_sha256[];
       (.guard_jsonl | test("^[0-9a-f]{64}$")) and (.guard_stderr | test("^[0-9a-f]{64}$")) and
       (.operator_trace_jsonl | test("^[0-9a-f]{64}$"))
@@ -967,7 +979,7 @@ jq -e \
   --arg calibration_checker_sha "$TRUSTED_CALIBRATION_CHECKER_SHA" \
   --arg evidence_checker_sha "$TRUSTED_EVIDENCE_CHECKER_SHA" \
   --slurpfile calibration_report "$CALIBRATION_REPORT" '
-    .calibration_summary_version == 1 and .summary_state == "final" and .run_id == $run and
+    .calibration_summary_version == 2 and .summary_state == "final" and .run_id == $run and
     .guard_contract == {version:5,source:"hid_system_state",coverage:"action_windows",privacy:"counts_and_held_state_boolean",policy:"consequential_input_only"} and
     .mechanical_validation.status == "valid" and .mechanical_validation.calibration_directory == "calibration" and
     .mechanical_validation.report == "guard-calibration-report.json" and
@@ -987,7 +999,7 @@ jq -e \
     .held_state_rejection.mode == "held_state" and .held_state_rejection.status == "passed" and
     .held_state_rejection.error_code == $calibration_report[0].controls.held_state_rejection.error_code and
     .held_state_rejection.physical_input_kind == $calibration_report[0].controls.held_state_rejection.physical_input_kind and
-    .sample_race_rejection == {mode:"sample_race",status:"passed",error_code:"INPUT_DURING_SAMPLE",physical_input_kind:"pointer_move_during_sample"}
+    .deterministic_sampling_contract == $calibration_report[0].sampling_contract
   ' "$CALIBRATION_SUMMARY" >/dev/null || die "guard calibration summary is incomplete or its report digest is stale"
 
 "$REBUILT_AUDITOR" --manifest "$MANIFEST" --jsonl "$RAW" > "$AUDIT_TMP" 2> "$AUDIT_STDERR_TMP"
@@ -1095,8 +1107,7 @@ cmp -s "$TRUSTED_EVIDENCE_CHECKER" "$EVIDENCE_CHECKER" || die "evidence final ch
     calibration/"$CALIBRATION_PREFIX"-positive-scroll.jsonl calibration/"$CALIBRATION_PREFIX"-positive-scroll.stderr calibration/"$CALIBRATION_PREFIX"-positive-scroll-trace.jsonl \
     calibration/"$CALIBRATION_PREFIX"-positive-drag.jsonl calibration/"$CALIBRATION_PREFIX"-positive-drag.stderr calibration/"$CALIBRATION_PREFIX"-positive-drag-trace.jsonl \
     calibration/"$CALIBRATION_PREFIX"-wrong-target.jsonl calibration/"$CALIBRATION_PREFIX"-wrong-target.stderr calibration/"$CALIBRATION_PREFIX"-wrong-target-trace.jsonl \
-    calibration/"$CALIBRATION_PREFIX"-held-state-rejection.jsonl calibration/"$CALIBRATION_PREFIX"-held-state-rejection.stderr calibration/"$CALIBRATION_PREFIX"-held-state-rejection-trace.jsonl \
-    calibration/"$CALIBRATION_PREFIX"-sample-race-rejection.jsonl calibration/"$CALIBRATION_PREFIX"-sample-race-rejection.stderr calibration/"$CALIBRATION_PREFIX"-sample-race-rejection-trace.jsonl; do
+    calibration/"$CALIBRATION_PREFIX"-held-state-rejection.jsonl calibration/"$CALIBRATION_PREFIX"-held-state-rejection.stderr calibration/"$CALIBRATION_PREFIX"-held-state-rejection-trace.jsonl; do
     shasum -a 256 "$relative_path"
   done
   for absolute_path in \

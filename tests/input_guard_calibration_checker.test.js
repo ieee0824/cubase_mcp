@@ -588,7 +588,6 @@ function buildFixture(fixtureDirectory, guardSha) {
     )
     buildWrongTarget(fixtureDirectory, guardSha, identity(7))
     buildHeldStateRejection(fixtureDirectory, guardSha, identity(8))
-    buildSampleRaceRejection(fixtureDirectory, guardSha, identity(9))
 }
 
 function runChecker(fixtureDirectory, guardSha) {
@@ -650,9 +649,9 @@ try {
     assert.equal(valid.status, 0, `valid fixture rejected:\nstdout: ${valid.stdout}\nstderr: ${valid.stderr}`)
     const report = JSON.parse(valid.stdout)
     assert.equal(report.status, 'valid')
-    assert.equal(report.calibration_report_version, 3)
+    assert.equal(report.calibration_report_version, 4)
     assert.equal(report.guard_contract.version, 5)
-    assert.equal(report.fresh_guard_identity_count, 9)
+    assert.equal(report.fresh_guard_identity_count, 8)
     assert.deepEqual(Object.keys(report.guard_sessions), [
         'automation',
         'move',
@@ -661,24 +660,27 @@ try {
         'positive-scroll',
         'positive-drag',
         'wrong-target',
-        'held-state-rejection',
-        'sample-race-rejection'
+        'held-state-rejection'
     ])
     assert.deepEqual(report.controls.held_state_rejection, {
         mode: 'held_state',
         error_code: 'KEY_HELD',
         physical_input_kind: 'keyboard_key_held'
     })
-    assert.deepEqual(report.controls.sample_race_rejection, {
-        mode: 'sample_race',
+    assert.deepEqual(report.controls.sampling_contract, {
+        mode: 'deterministic_os_read_substitution',
         error_code: 'INPUT_DURING_SAMPLE',
-        physical_input_kind: 'pointer_move_during_sample'
+        runtime_physical_race_reproduced: false
     })
+    assert.equal(report.sampling_contract.status, 'passed')
+    assert.equal(report.sampling_contract.cases, 12)
+    assert.equal(report.sampling_contract.runtime_physical_race_reproduced, false)
+    assert.equal(report.sampling_contract.source_sha256, sha256File(path.join(repositoryRoot, 'src/bin/cubase_input_guard.rs')))
     assert.equal(Object.hasOwn(report.controls, 'sample_guard_rejection'), false)
 
     // An unrelated incomplete process does not invalidate an independent,
     // complete process from the same source directory. These are synthetic
-    // records only; acceptance still requires all nine complete profiles.
+    // records only; acceptance still requires all eight complete profiles.
     const firstSource = path.join(root, 'source-with-later-failure')
     const secondSource = path.join(root, 'independent-source')
     buildFixture(firstSource, guardSha)
@@ -733,9 +735,9 @@ try {
     assert.equal(reused.status, 0, `complete reused processes rejected:\nstdout: ${reused.stdout}\nstderr: ${reused.stderr}`)
     const reusedReport = JSON.parse(reused.stdout)
     assert.equal(reusedReport.status, 'valid')
-    assert.equal(reusedReport.fresh_guard_identity_count, 9)
+    assert.equal(reusedReport.fresh_guard_identity_count, 8)
     assert.deepEqual(reusedReport.guard_sessions, report.guard_sessions)
-    assert.equal(selectedBytes.size, 87, 'copy all 27 process files and all 60 capture artifacts')
+    assert.equal(selectedBytes.size, 80, 'copy all 24 process files and all 56 capture artifacts')
     assert.equal(fs.existsSync(path.join(reusedFixture, 'failed-attempt.txt')), false)
 
     expectRejected(reusedFixture, root, guardSha, 'incomplete-reused-process', /trace timestamps must .* strictly increase/, (fixture) => {
@@ -808,16 +810,13 @@ try {
         })
     })
 
-    expectRejected(validFixture, root, guardSha, 'sample-race-wrong-kind', /sample-race rejection trace invalid/, (fixture) => {
-        const traceFile = path.join(fixture, `${prefix}-sample-race-rejection-trace.jsonl`)
-        mutateJsonl(traceFile, (records) => {
-            records[1].physical_input.kind = 'pointer_move_only'
-        })
+    expectRejected(validFixture, root, guardSha, 'legacy-physical-race-is-not-new-evidence', /unexpected calibration artifact/, (fixture) => {
+        buildSampleRaceRejection(fixture, guardSha, identity(9))
     })
 
-    expectRejected(validFixture, root, guardSha, 'missing-independent-sample-race', /27 canonical files/, (fixture) => {
+    expectRejected(validFixture, root, guardSha, 'missing-held-state', /24 canonical files/, (fixture) => {
         for (const suffix of ['.jsonl', '.stderr', '-trace.jsonl']) {
-            fs.rmSync(path.join(fixture, `${prefix}-sample-race-rejection${suffix}`))
+            fs.rmSync(path.join(fixture, `${prefix}-held-state-rejection${suffix}`))
         }
     })
 
@@ -837,8 +836,8 @@ try {
         })
     })
 
-    expectRejected(validFixture, root, guardSha, 'sample-race-input-ends-before-sample-completes', /sample rejection is not time-bound/, (fixture) => {
-        const traceFile = path.join(fixture, `${prefix}-sample-race-rejection-trace.jsonl`)
+    expectRejected(validFixture, root, guardSha, 'held-input-ends-before-sample-completes', /sample rejection is not time-bound/, (fixture) => {
+        const traceFile = path.join(fixture, `${prefix}-held-state-rejection-trace.jsonl`)
         mutateJsonl(traceFile, (records) => {
             records[1].call_ended_at = timestamp(64)
         })
@@ -971,22 +970,22 @@ try {
         })
     })
 
-    expectRejected(validFixture, root, guardSha, 'sample-error-command-mismatch', /sample-race rejection guard stream invalid/, (fixture) => {
-        const guard = path.join(fixture, `${prefix}-sample-race-rejection.jsonl`)
+    expectRejected(validFixture, root, guardSha, 'sample-error-command-mismatch', /held-state rejection guard stream invalid/, (fixture) => {
+        const guard = path.join(fixture, `${prefix}-held-state-rejection.jsonl`)
         mutateJsonl(guard, (records) => {
             records[1].command = 'check'
         })
     })
 
     expectRejected(validFixture, root, guardSha, 'sample-error-missing-timing-pair', /guard v5 identity, timing, or record sequence invalid/, (fixture) => {
-        const guard = path.join(fixture, `${prefix}-sample-race-rejection.jsonl`)
+        const guard = path.join(fixture, `${prefix}-held-state-rejection.jsonl`)
         mutateJsonl(guard, (records) => {
             delete records[1].sample_started_at_unix_ms
             delete records[1].sample_completed_at_unix_ms
         })
     })
 
-    expectRejected(validFixture, root, guardSha, 'duplicate-identity', /nine distinct fresh process identities/, (fixture) => {
+    expectRejected(validFixture, root, guardSha, 'duplicate-identity', /eight distinct fresh process identities/, (fixture) => {
         const automation = readJsonl(path.join(fixture, `${prefix}-automation.jsonl`))[0]
         const duplicateFields = {
             guard_session_id: automation.guard_session_id,

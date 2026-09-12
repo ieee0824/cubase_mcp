@@ -203,11 +203,77 @@ assert.match(
 )
 assert.equal(actionCount + 2, 65)
 assert.equal(actionCount * 2, 126)
-assert.equal(nonCaptureIndexEntryCount, 101)
-assert.equal(nonCaptureIndexEntryCount + actionCount * 4, 353)
+assert.equal(nonCaptureIndexEntryCount, 14 + 8 * 3 + 14 * 4)
+assert.equal(nonCaptureIndexEntryCount + actionCount * 4, 346)
+const calibrationIndexLoop = checker.match(/for relative_path in calibration\/[\s\S]*?; do/)[0]
+assert.equal((calibrationIndexLoop.match(/\$CALIBRATION_PREFIX/g) || []).length, 24)
 assert.match(checker, /held-state-rejection\.jsonl/)
-assert.match(checker, /sample-race-rejection\.jsonl/)
+assert.match(checker, /deterministic_sampling_contract/)
+assert.match(checker, /\.calibration_report_version == 4/)
+assert.match(checker, /\.sampling_contract\.source_sha256 == \$sampling_source_sha/)
+assert.match(checker, /\.sampling_contract\.runtime_physical_race_reproduced == false/)
+assert.match(checker, /CARGO_TARGET_DIR="\$REPRO_BUILD_DIRECTORY" bash "\$TRUSTED_CALIBRATION_CHECKER"/)
+assert.doesNotMatch(checker, /sample-race-rejection\.jsonl/)
 assert.doesNotMatch(checker, /-sample-rejection\.(?:jsonl|stderr)/)
+
+// Execute the actual final-report filter, including the new evidence-domain
+// boundary. A physical-only report or a stale/self-described test cannot pass.
+const samplingReportFilter = checker.match(
+    /--arg sampling_checker_sha [^\n]* '\n([\s\S]*?)\n  ' "\$CALIBRATION_TMP"/
+)
+assert.ok(samplingReportFilter, 'missing final sampling report predicate')
+const samplingHash = 'a'.repeat(64)
+const samplingNames = ['automation', 'move', 'positive-click', 'positive-key',
+    'positive-scroll', 'positive-drag', 'wrong-target', 'held-state-rejection']
+const samplingReportFixture = {
+    calibration_report_version: 4, status: 'valid', file_prefix: 'cmcp-calibration',
+    guard_contract: {version: 5, source: 'hid_system_state', coverage: 'action_windows',
+        privacy: 'counts_and_held_state_boolean', policy: 'consequential_input_only', binary_sha256: samplingHash},
+    checker_sha256: samplingHash, all_pre_post_artifact_digests_recomputed: true,
+    controls: {
+        automation_negative: ['exec_command.open', 'computer_use.press_key', 'computer_use.set_value',
+            'computer_use.click.element', 'computer_use.click.coordinate.single', 'computer_use.click.coordinate.double'],
+        move_only_acceptance: ['semantic_target_binding', 'coordinate_target_binding'],
+        consequential_positive: ['physical_click', 'physical_key', 'physical_scroll', 'physical_drag'],
+        target_binding_rejection: 'wrong_valid_coordinate_rejected_after_clean_result',
+        held_state_rejection: {mode: 'held_state', error_code: 'KEY_HELD', physical_input_kind: 'keyboard_key_held'},
+        sampling_contract: {mode: 'deterministic_os_read_substitution', error_code: 'INPUT_DURING_SAMPLE', runtime_physical_race_reproduced: false}
+    },
+    sampling_contract: {
+        sampling_contract_report_version: 1, status: 'passed', mode: 'deterministic_os_read_substitution',
+        test: 'tests::deterministic_sampling_contract', cases: 12, runtime_physical_race_reproduced: false,
+        source_sha256: samplingHash, cargo_lock_sha256: samplingHash, checker_sha256: samplingHash
+    },
+    fresh_guard_identity_count: 8,
+    guard_sessions: Object.fromEntries(samplingNames.map(name => [name, {}])),
+    evidence_sha256: Object.fromEntries(samplingNames.map(name => [name, {
+        guard_jsonl: samplingHash, guard_stderr: samplingHash, operator_trace_jsonl: samplingHash
+    }]))
+}
+function acceptsSamplingReport(report) {
+    const args = ['-s', '-e']
+    for (const key of ['guard_sha', 'checker_sha', 'sampling_source_sha', 'sampling_lock_sha', 'sampling_checker_sha']) {
+        args.push('--arg', key, samplingHash)
+    }
+    args.push(samplingReportFilter[1])
+    return childProcess.spawnSync('jq', args, {input: JSON.stringify(report), encoding: 'utf8'}).status === 0
+}
+assert.equal(acceptsSamplingReport(samplingReportFixture), true)
+for (const mutate of [
+    report => { report.calibration_report_version = 3 },
+    report => { delete report.sampling_contract },
+    report => { report.sampling_contract.status = 'not_run' },
+    report => { report.sampling_contract.cases = 0 },
+    report => { report.sampling_contract.runtime_physical_race_reproduced = true },
+    report => { report.sampling_contract.source_sha256 = 'b'.repeat(64) },
+    report => { report.sampling_contract.cargo_lock_sha256 = 'b'.repeat(64) },
+    report => { report.sampling_contract.checker_sha256 = 'b'.repeat(64) },
+    report => { report.fresh_guard_identity_count = 9 }
+]) {
+    const changed = structuredClone(samplingReportFixture)
+    mutate(changed)
+    assert.equal(acceptsSamplingReport(changed), false)
+}
 
 assert.match(checker, /--bin cubase_track_probe_collector/)
 assert.match(checker, /--bin cubase_input_guard/)

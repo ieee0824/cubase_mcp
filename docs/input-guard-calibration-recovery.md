@@ -141,6 +141,10 @@ SDK headerの`CGEventSourceKeyState` / state IDとRustのFFI型・定数に不�
 
 2026-09-13のlauncher導入検証では、自動テスト16/16に加え、未変更の凍結guardを使う新規の権限付きshell / PTY processを1回実行しました。承認後の`awaiting_start`時点でguard stdout / stderrが0 byteであること、開始合図後に同じPIDのguardが`ready`を返すことを確認し、UI操作なしで`arm → check → finish`を完了しました。rawは連続4 record、全16 delta 0、空stderr、exit 0でした。この新しい区間についてユーザー無操作の確認は取得していないため、先の84 sampleのattestationを流用しません。rawと別のlaunch logはローカルに保持し、正式runや校正bundleには算入しません。
 
+その後、ユーザーから承認はいつもEnterで確定していると確認を得ました。これは承認方法についての事後申告であり、失敗sample時にEnterが押下中だったという確認ではありません。「承認のEnter key-down後、key-upより先にguardの初回sampleが走った」という起動時入力の競合を具体的な原因候補として扱えますが、当時のkey-upとsampleの対応時刻はなく、因果関係は未確定です。過去のrawや無操作区間のattestationを変更せず、guardの誤判定・OSのsticky state・ユーザーの指示違反を確定したものとも扱いません。
+
+launcher変更`14e5a7d`のCI run `34726582682`はLinux / macOS / Windowsすべて成功しました。launcherのhandshakeテストはLinux / macOSで実施し、Windowsで同じshell起動経路を検証したという意味ではありません。旧`c955405`へ結び付けたrun前inventory・build記録はそのcommitの準備として保持し、新しいcommitやlauncher contextへ無条件に流用しません。
+
 - 自動操作の準備が済んでから、対象の物理入力controlに対する現在の準備確認を得ます。過去の「準備OK」を新しい入力区間の確認に使いません。
 - 各controlの入力内容、開始、終了を明示します。見落としやtiming違いがあれば、そのcontrolのプロセスは未成立として残します。ユーザーの操作ミスと断定しません。
 - 「部分確認済み実測action数 / 14」「完全bundle数 / 8」「決定的テスト結果」「校正全体の合否」と「採用済みCubase実測数 / 2」を分けて表示します。工程数を作業量の割合に換算しません。

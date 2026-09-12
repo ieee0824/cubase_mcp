@@ -109,6 +109,16 @@ SDK headerの`CGEventSourceKeyState` / state IDとRustのFFI型・定数に不�
 
 #32の残件は、過去の失敗と今回の成功の条件差・再現条件の切り分けです。恒常的な故障と断定せず、無入力snapshot単独を安全保証にせず、実操作ごとのguard / target / postcondition検証は引き続き必要です。起動条件を調べるためにrelease guardを書き換えたり、キー解放を注入したり、ユーザー操作を依頼したりはしていません。
 
+### 2026-09-13: 起動経路の比較
+
+同じ読み取り専用診断を権限付きで3つの経路から各1回実行しました。直接起動では両OS tableの通常範囲key押下数0、即時のshell pipeでは1、起動前に3秒待ったshell pipeでは0でした。どのsampleもaggregate変化なし、拡張範囲keyとmouse buttonの押下数0、Caps Lock / modifier flagなしです。個別key番号、入力内容、device識別子は記録していません。
+
+続いて同じ凍結guardを権限付きshell / pipe / PTYから起動前3秒待機で1回実行し、`ready → arm → check → finish`、連続4 record、全16 delta 0、exit 0、空stderrを確認しました。UI入力なし、別processの接合なし、raw JSONLと比較結果はローカルだけに保存しています。これはstartup診断であり正式校正の追加bundleではありません。
+
+この比較は起動経路・タイミングへの依存を再観測したもので、ランダム化した同時測定ではありません。ユーザー無操作のattestationも取得していないため、誰が何を押したか、OSのsticky stateか、承認画面の影響かは判定できません。#32の根本原因を特定済みとはせず、必要ならその別調査を続けます。
+
+現時点の運用候補は、必要な権限承認を先に済ませ、sampleの外側で3秒待ってからguardを開始し、実際の`ready`と各`arm` / `check`を必須にする方法です。3秒で必ず安全になるという保証ではありません。held / timeout / race等が返れば停止し、同じrunを待機や自動再起動で救済しません。異なるparent / pipe / tool contextへの互換性は#35で別途照合します。
+
 - 自動操作の準備が済んでから、対象の物理入力controlに対する現在の準備確認を得ます。過去の「準備OK」を新しい入力区間の確認に使いません。
 - 各controlの入力内容、開始、終了を明示します。見落としやtiming違いがあれば、そのcontrolのプロセスは未成立として残します。ユーザーの操作ミスと断定しません。
 - 「部分確認済み実測action数 / 14」「完全bundle数 / 8」「決定的テスト結果」「校正全体の合否」と「採用済みCubase実測数 / 2」を分けて表示します。工程数を作業量の割合に換算しません。

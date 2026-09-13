@@ -48,6 +48,13 @@ function makeDirectAccessMock(options, calls) {
         mOnParameterChange() {},
         activate(activeMapping) {
             calls.directActivate.push(activeMapping)
+            if (options.directActivateObjectChange !== undefined) {
+                this.mOnObjectChange(
+                    options.activeDeviceForDirectUpdate,
+                    activeMapping,
+                    options.directActivateObjectChange
+                )
+            }
             if (options.directActivateThrows) {
                 throw new Error(externalError || 'direct activate failed')
             }
@@ -67,6 +74,17 @@ function makeDirectAccessMock(options, calls) {
         },
         deactivate(activeMapping) {
             calls.directDeactivate.push(activeMapping)
+            for (
+                let index = 0;
+                index < (options.directDeactivateRemovalCount || 0);
+                index += 1
+            ) {
+                this.mOnObjectWillBeRemoved(
+                    options.activeDeviceForDirectUpdate,
+                    activeMapping,
+                    index
+                )
+            }
             if (options.directDeactivateThrows) {
                 throw new Error(externalError || 'direct deactivate failed')
             }
@@ -394,7 +412,7 @@ function createHarness(options = {}) {
             return driver
         },
         mDefaults: options.directAccessVersion
-            ? { mAppVersion: { getVersionString() { return '15.0.30.287' } } }
+            ? { mAppVersion: { getVersionString() { return '15.0.30' } } }
             : {}
     }
     const context = vm.createContext({
@@ -615,7 +633,18 @@ function testApi11MixerBanksCommandsAndOverflow() {
     const capability = events(harness, 'probe.capabilities').at(-1)
     assert.equal(loaded.data.probe_session_id, envelopes(harness)[0].source_instance_id)
     assert.equal(events(harness, 'probe.ready').length, 0)
+    assert.equal(capability.data.host_version, null)
     assert.equal(capability.data.direct_access.supported, false)
+    assert.equal(
+        capability.data.direct_access.projection,
+        'mix_console_root_children_v1'
+    )
+    assert.equal(capability.data.direct_access.scope_depth, 1)
+    assert.equal(
+        capability.data.direct_access.authoritative_for_track_enumeration,
+        false
+    )
+    assert.equal(capability.data.limits.direct_access_depth, 1)
     assert.equal(capability.data.mixer_bank.slot_count, 8)
     assert.equal(capability.data.mixer_bank.explicit_main_filter, false)
     assert.deepEqual(
@@ -904,16 +933,201 @@ function testSnapshotQueuesAreBoundedAndDeactivationIsFailClosed() {
         deactivation.activeMapping,
         'pending-before-deactivate'
     )
+    const deactivationMessageStart = messages(deactivation).length
     deactivation.deactivate()
 
-    const discard = events(deactivation, 'probe.overflow').find(event =>
-        event.data.stream === 'deactivation_discard'
+    const deactivationMessages = messages(deactivation).slice(deactivationMessageStart)
+    const flushedFeedbackIndex = deactivationMessages.findIndex(message =>
+        message.event === 'probe.bank.chunk' &&
+        message.data.stream === 'mixer_bank_feedback'
     )
-    assert.ok(discard)
-    assert.equal(discard.data.pending_feedback_items, 1)
-    assert.equal(discard.data.discarded_items, 1)
+    const inactiveIndex = deactivationMessages.findIndex(message =>
+        message.event === 'probe.ready' && message.data.ready === false
+    )
+    assert.ok(flushedFeedbackIndex >= 0)
+    assert.ok(inactiveIndex > flushedFeedbackIndex)
+    assert.equal(events(deactivation, 'probe.overflow').length, 0)
+    assert.equal(deactivation.context.pendingFeedback.length, 0)
     assert.equal(events(deactivation, 'probe.ready').at(-1).data.ready, false)
     assertSourceSequence(deactivation)
+
+    const initializing = createHarness({
+        directAccessVersion: '1.3',
+        directActivateObjectChange: 0,
+        graph: { base: 0, children: { 0: [] }, metadata: {} }
+    })
+    initializing.activate()
+    assert.equal(
+        events(initializing, 'probe.capabilities').at(-1).data.host_version,
+        '15.0.30'
+    )
+    assert.deepEqual(
+        Array.from(
+            initializing.context.pendingDirectAccessSnapshots,
+            pending => pending.reason
+        ),
+        ['page_activate']
+    )
+    initializing.idle(5)
+    const initializingFeedback = eventItems(
+        initializing,
+        'probe.direct_access.chunk',
+        data => data.stream === 'direct_access_feedback'
+    )
+    assert.equal(initializingFeedback.length, 1)
+    assert.equal(initializingFeedback[0].change, 'object_change')
+    assert.equal(
+        events(initializing, 'probe.direct_access.chunk').some(event =>
+            event.data.stream === 'direct_access_snapshot' &&
+            event.data.reason === 'object_change'
+        ),
+        false
+    )
+    assert.ok(events(initializing, 'probe.direct_access.chunk').some(event =>
+        event.data.stream === 'direct_access_snapshot' &&
+        event.data.reason === 'page_activate' &&
+        event.data.snapshot_complete === true
+    ))
+    assert.equal(events(initializing, 'probe.ready').at(-1).data.ready, true)
+    assert.equal(events(initializing, 'probe.overflow').length, 0)
+    assertSourceSequence(initializing)
+
+    const reactivation = createHarness({
+        directAccessVersion: '1.3',
+        directDeactivateRemovalCount: 88,
+        graph: { base: 0, children: { 0: [] }, metadata: {} }
+    })
+    reactivation.activate()
+    reactivation.idle(5)
+    assert.equal(reactivation.context.pendingFeedback.length, 0)
+    assert.equal(reactivation.context.pendingDirectAccessSnapshots.length, 0)
+
+    const reactivationMessageStart = messages(reactivation).length
+    reactivation.deactivate()
+    const boundaryMessages = messages(reactivation).slice(reactivationMessageStart)
+    const boundaryFeedback = boundaryMessages.filter(message =>
+        message.type === 'event' &&
+        message.data &&
+        (
+            message.data.stream === 'mixer_bank_feedback' ||
+            message.data.stream === 'direct_access_feedback'
+        )
+    )
+    const boundaryObservationSequence = boundaryFeedback.flatMap(message =>
+        message.data.items.map(item => item.observation_seq)
+    )
+    assert.equal(boundaryObservationSequence.length, 88)
+    for (let index = 1; index < boundaryObservationSequence.length; index += 1) {
+        assert.equal(
+            boundaryObservationSequence[index],
+            boundaryObservationSequence[index - 1] + 1
+        )
+    }
+    const boundaryInactiveIndex = boundaryMessages.findIndex(message =>
+        message.event === 'probe.ready' && message.data.ready === false
+    )
+    assert.ok(boundaryInactiveIndex > 0)
+    assert.ok(boundaryMessages.slice(0, boundaryInactiveIndex).includes(
+        boundaryFeedback.at(-1)
+    ))
+    assert.equal(
+        boundaryMessages.some(message =>
+            message.event === 'probe.direct_access.chunk' &&
+            message.data.stream === 'direct_access_snapshot' &&
+            [
+                'object_change',
+                'object_will_be_removed',
+                'parameter_change'
+            ].includes(message.data.reason)
+        ),
+        false
+    )
+    assert.equal(events(reactivation, 'probe.overflow').length, 0)
+    assert.equal(reactivation.context.pendingFeedback.length, 0)
+    assert.equal(reactivation.context.pendingDirectAccessSnapshots.length, 0)
+
+    reactivation.page.mOnActivate(
+        reactivation.activeDevice,
+        reactivation.activeMapping
+    )
+    reactivation.idle(5)
+    assert.equal(events(reactivation, 'probe.loaded').length, 1)
+    assert.equal(events(reactivation, 'probe.mapping_active').length, 2)
+    assert.equal(events(reactivation, 'probe.ready').at(-1).data.ready, true)
+    assert.equal(events(reactivation, 'probe.overflow').length, 0)
+    assertSourceSequence(reactivation)
+
+    for (const removalCount of [512, 513]) {
+        const boundary = createHarness({
+            directAccessVersion: '1.3',
+            directDeactivateRemovalCount: removalCount,
+            graph: { base: 0, children: { 0: [] }, metadata: {} }
+        })
+        boundary.activate()
+        boundary.idle(5)
+        boundary.deactivate()
+        const drained = eventItems(
+            boundary,
+            'probe.direct_access.chunk',
+            data => data.stream === 'direct_access_feedback'
+        )
+        assert.equal(drained.length, 512)
+        const queueOverflow = events(boundary, 'probe.overflow').filter(event =>
+            event.data.stream === 'feedback_queue'
+        )
+        assert.equal(queueOverflow.length, removalCount === 512 ? 0 : 1)
+        assert.equal(
+            events(boundary, 'probe.overflow').length,
+            removalCount === 512 ? 0 : 1
+        )
+        if (removalCount === 513) {
+            assert.equal(queueOverflow[0].data.dropped_items, 1)
+            const boundaryMessages = messages(boundary)
+            const overflowIndex = boundaryMessages.findIndex(message =>
+                message.event === 'probe.overflow' &&
+                message.data.stream === 'feedback_queue'
+            )
+            const readyIndex = boundaryMessages.findIndex(message =>
+                message.event === 'probe.ready' && message.data.ready === false
+            )
+            assert.ok(overflowIndex >= 0)
+            assert.ok(readyIndex > overflowIndex)
+        }
+        assert.equal(boundary.context.pendingFeedback.length, 0)
+        assert.equal(boundary.context.pendingDroppedFeedback.total, 0)
+        assert.equal(boundary.context.pendingDirectAccessSnapshots.length, 0)
+        assert.equal(events(boundary, 'probe.ready').at(-1).data.ready, false)
+        assertSourceSequence(boundary)
+    }
+
+    const commandPending = createHarness({
+        directAccessVersion: '1.3',
+        graph: { base: 0, children: { 0: [] }, metadata: {} }
+    })
+    commandPending.activate()
+    commandPending.idle(5)
+    request(commandPending, 'pending-bank-snapshot', 'probe.bank.snapshot', {
+        config_id: 'MB_CORE_ALL'
+    })
+    request(commandPending, 'pending-command-snapshot', 'probe.direct_access.snapshot')
+    commandPending.context.pendingDirectAccessSnapshots.push(
+        { reason: 'page_activate', updated: false },
+        { reason: 'future_reason', updated: false }
+    )
+    assert.equal(response(commandPending, 'pending-bank-snapshot').type, 'response')
+    assert.equal(response(commandPending, 'pending-command-snapshot').type, 'response')
+    assert.equal(commandPending.context.pendingBankSnapshots.length, 1)
+    assert.equal(commandPending.context.pendingDirectAccessSnapshots.length, 3)
+    commandPending.deactivate()
+    const commandDiscard = events(commandPending, 'probe.overflow').find(event =>
+        event.data.stream === 'deactivation_discard'
+    )
+    assert.ok(commandDiscard)
+    assert.equal(commandDiscard.data.pending_bank_snapshots, 1)
+    assert.equal(commandDiscard.data.pending_direct_access_snapshots, 3)
+    assert.equal(commandDiscard.data.discarded_items, 4)
+    assert.equal(events(commandPending, 'probe.ready').at(-1).data.ready, false)
+    assertSourceSequence(commandPending)
 
     const lateCallback = createHarness()
     lateCallback.activate()
@@ -1558,7 +1772,28 @@ function testDirectAccessSourceRedactionAndFixtureIdFragments() {
         data => data.stream === 'direct_access_snapshot'
     )
     const observations = wireItems.filter(item => item.record_kind === 'observation')
+    const fragments = wireItems.filter(item =>
+        item.record_kind === 'host_id_fragment'
+    )
+    const snapshotChunks = events(harness, 'probe.direct_access.chunk').filter(event =>
+        event.data.stream === 'direct_access_snapshot'
+    )
     assert.equal(observations.length, 9)
+    assert.deepEqual(
+        observations.map(item => item.children_expanded),
+        [true, false, false, false, false, false, false, false, false]
+    )
+    assert.ok(snapshotChunks.every(event =>
+        event.data.projection === 'mix_console_root_children_v1' &&
+        event.data.scope_depth === 1 &&
+        event.data.scope_complete === true &&
+        event.data.host_graph_complete === false &&
+        event.data.root_child_count === 8 &&
+        event.data.authoritative_for_track_enumeration === false &&
+        event.data.observation_items === observations.length &&
+        event.data.reference_items === 0 &&
+        event.data.total_items === observations.length + fragments.length
+    ))
     assert.ok(observations.every(item => item.unique_name === null))
     assert.ok(observations.every(item => item.unique_name_redacted === true))
     assert.equal(
@@ -1932,8 +2167,11 @@ function testDirectAccessEnumerationFailuresAreIncomplete() {
         event.data.stream === 'direct_access_snapshot'
     )
     assert.ok(countChunks.every(event => event.data.truncated === true))
+    assert.ok(countChunks.every(event => event.data.scope_complete === false))
     assert.ok(countChunks[0].data.truncation_reasons.includes('child_count_failed'))
     assert.equal(countChunks[0].data.observation_items, 1)
+    assert.equal(countChunks[0].data.reference_items, 0)
+    assert.equal(countChunks[0].data.error_count, 1)
 
     const invalidChild = createHarness({
         directAccessVersion: '1.2',
@@ -1946,10 +2184,37 @@ function testDirectAccessEnumerationFailuresAreIncomplete() {
         event.data.stream === 'direct_access_snapshot'
     )
     assert.ok(childChunks.every(event => event.data.truncated === true))
+    assert.ok(childChunks.every(event =>
+        event.data.scope_complete === false && event.data.root_child_count === 1
+    ))
     assert.ok(childChunks[0].data.truncation_reasons.includes(
         'invalid_child_object_id'
     ))
     assert.equal(childChunks[0].data.observation_items, 1)
+    assert.equal(childChunks[0].data.reference_items, 0)
+    assert.equal(childChunks[0].data.error_count, 1)
+
+    const childGetterFailure = createHarness({
+        directAccessVersion: '1.2',
+        throwChildId: { objectId: 0, childIndex: 0 },
+        graph: { base: 0, children: { 0: [1], 1: [] }, metadata: {} }
+    })
+    childGetterFailure.activate()
+    childGetterFailure.idle(2)
+    const childGetterChunks = events(
+        childGetterFailure,
+        'probe.direct_access.chunk'
+    ).filter(event => event.data.stream === 'direct_access_snapshot')
+    assert.ok(childGetterChunks.every(event => event.data.truncated === true))
+    assert.ok(childGetterChunks.every(event =>
+        event.data.scope_complete === false && event.data.root_child_count === 1
+    ))
+    assert.ok(childGetterChunks[0].data.truncation_reasons.includes(
+        'child_object_id_failed'
+    ))
+    assert.equal(childGetterChunks[0].data.observation_items, 1)
+    assert.equal(childGetterChunks[0].data.reference_items, 0)
+    assert.equal(childGetterChunks[0].data.error_count, 1)
 
     const invalidCount = createHarness({
         directAccessVersion: '1.2',
@@ -1965,6 +2230,9 @@ function testDirectAccessEnumerationFailuresAreIncomplete() {
         'invalid_child_count'
     ))
     assert.equal(invalidCountChunks[0].data.truncated, true)
+    assert.equal(invalidCountChunks[0].data.scope_complete, false)
+    assert.equal(invalidCountChunks[0].data.reference_items, 0)
+    assert.equal(invalidCountChunks[0].data.error_count, 1)
 }
 
 function testOpaqueHostIdsAreLosslessAndFragmented() {
@@ -1979,7 +2247,7 @@ function testOpaqueHostIdsAreLosslessAndFragmented() {
         },
         graph: {
             base: 0,
-            children: { 0: [1], 1: [] },
+            children: { 0: [1, 0], 1: [] },
             metadata: {
                 0: {
                     uniqueName: 'root',
@@ -2018,7 +2286,30 @@ function testOpaqueHostIdsAreLosslessAndFragmented() {
     const directMainItems = directWireItems.filter(item =>
         item.record_kind === 'observation'
     )
+    const directReferenceItems = directWireItems.filter(item =>
+        item.record_kind === 'object_reference'
+    )
+    const directFragmentItems = directWireItems.filter(item =>
+        item.record_kind === 'host_id_fragment'
+    )
+    const directChunks = events(harness, 'probe.direct_access.chunk').filter(event =>
+        event.data.stream === 'direct_access_snapshot'
+    )
     assert.equal(directMainItems.length, 2)
+    assert.equal(directReferenceItems.length, 1)
+    assert.equal(directFragmentItems.length > 0, true)
+    assert.ok(directChunks.every(event => event.data.observation_items === 2))
+    assert.ok(directChunks.every(event => event.data.reference_items === 1))
+    assert.ok(directChunks.every(event => event.data.cycle_count === 1))
+    assert.ok(directChunks.every(event =>
+        event.data.shared_reference_count === 0
+    ))
+    assert.ok(directChunks.every(event =>
+        event.data.total_items ===
+            directMainItems.length +
+            directReferenceItems.length +
+            directFragmentItems.length
+    ))
     assert.deepEqual(
         directMainItems.map(item => resolveHostId(item, directWireItems)),
         [directRootId, directTrackId]
@@ -2230,82 +2521,278 @@ function testDirectAccessDeactivateFailureIsFatal() {
     assertSourceSequence(harness)
 }
 
-function testApi13TypeCycleAndTraversalBounds() {
-    const cyclicHarness = createHarness({
+function testApi13RootChildrenProjectionAndBounds() {
+    const children = { 0: [1] }
+    const metadata = {
+        0: {
+            uniqueName: 'root-secret',
+            uniqueId: 'root-secret-id',
+            title: 'MixConsole',
+            type: 'MixConsole',
+            visible: true,
+            index: -1,
+            zone: 0
+        },
+        1: {
+            uniqueName: 'ambient-secret-name',
+            uniqueId: 'ambient-secret-id',
+            title: 'Input github_pat_root_frontier_secret',
+            type: 'PrivateAmbientType',
+            visible: true,
+            index: -1,
+            zone: 0
+        }
+    }
+    for (let descendant = 0; descendant < 53; descendant += 1) {
+        const objectId = 100 + descendant
+        children[1] = children[1] || []
+        children[1].push(objectId)
+        children[objectId] = []
+    }
+    for (let trackIndex = 0; trackIndex < 8; trackIndex += 1) {
+        const trackId = trackIndex + 2
+        children[0].push(trackId)
+        children[trackId] = []
+        metadata[trackId] = {
+            uniqueName: `track-${trackIndex}-secret-name`,
+            uniqueId: `fixture-e8-${trackIndex + 1}-id`,
+            title: `CMCP_E8_0${trackIndex + 1}`,
+            type: 'AudioChannel',
+            visible: true,
+            index: trackIndex + 1,
+            zone: 0
+        }
+        for (let descendant = 0; descendant < 78; descendant += 1) {
+            const objectId = 1000 + trackIndex * 100 + descendant
+            children[trackId].push(objectId)
+            children[objectId] = []
+        }
+    }
+    children[0].push(2)
+
+    const largeHarness = createHarness({
         directAccessVersion: '1.3',
         explicitMainFilter: true,
-        graph: {
-            base: 0,
-            children: { 0: [1], 1: [0] },
-            metadata: {
-                0: {
-                    uniqueName: 'root',
-                    uniqueId: 'root-id',
-                    title: 'Root',
-                    type: 'MixConsole',
-                    visible: true,
-                    index: 0,
-                    zone: 0
-                },
-                1: {
-                    uniqueName: 'track',
-                    uniqueId: 'track-id',
-                    title: 'Track',
-                    type: 'AudioChannel',
-                    visible: true,
-                    index: 1,
-                    zone: 0
-                }
-            }
-        }
+        graph: { base: 0, children, metadata }
     })
-    cyclicHarness.activate()
-    cyclicHarness.idle(2)
+    largeHarness.activate()
+    largeHarness.idle(2)
 
-    const capability = events(cyclicHarness, 'probe.capabilities').at(-1).data
+    const capability = events(largeHarness, 'probe.capabilities').at(-1).data
     assert.equal(capability.direct_access.get_object_type_name_v1_3, true)
+    assert.equal(
+        capability.direct_access.projection,
+        'mix_console_root_children_v1'
+    )
+    assert.equal(capability.direct_access.scope_depth, 1)
+    assert.equal(
+        capability.direct_access.authoritative_for_track_enumeration,
+        false
+    )
+    assert.equal(capability.limits.direct_access_nodes, 256)
+    assert.equal(capability.limits.direct_access_depth, 1)
+    assert.equal(capability.limits.direct_access_children, 128)
     assert.equal(capability.mixer_bank.explicit_main_filter, true)
-    assert.ok(cyclicHarness.zones.every(zone =>
+    assert.ok(largeHarness.zones.every(zone =>
         zone.filterCalls.some(call => call[0] === 'includeWindowZoneMainChannels')
     ))
 
-    const cycleEvents = events(cyclicHarness, 'probe.direct_access.chunk').filter(event =>
+    const largeEvents = events(largeHarness, 'probe.direct_access.chunk').filter(event =>
         event.data.stream === 'direct_access_snapshot' &&
         event.data.reason === 'page_activate'
     )
-    assert.equal(cycleEvents.length, 1)
-    assert.equal(cycleEvents[0].data.cycle_count, 1)
-    assert.equal(cycleEvents[0].data.items.length, 2)
+    const largeItems = largeEvents.flatMap(event => event.data.items)
+    const largeObservations = largeItems.filter(item =>
+        item.record_kind === 'observation'
+    )
+    const largeReferences = largeItems.filter(item =>
+        item.record_kind === 'object_reference'
+    )
+    assert.equal(largeObservations.length, 10)
+    assert.equal(largeReferences.length, 1)
     assert.deepEqual(
-        cycleEvents[0].data.items.map(item => item.type_name),
-        ['MixConsole', 'AudioChannel']
+        largeObservations.map(item => item.object_id),
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
     )
-    cyclicHarness.deactivate()
-    assertSourceSequence(cyclicHarness)
+    assert.deepEqual(
+        largeObservations.map(item => item.depth),
+        [0, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+    )
+    assert.deepEqual(
+        largeObservations.map(item => item.children_expanded),
+        [true, false, false, false, false, false, false, false, false, false]
+    )
+    assert.deepEqual(
+        largeObservations.map(item => item.child_count),
+        [10, 53, 78, 78, 78, 78, 78, 78, 78, 78]
+    )
+    assert.deepEqual(largeReferences, [{
+        record_kind: 'object_reference',
+        observation_epoch: largeEvents[0].data.observation_epoch,
+        observation_epoch_status: 'snapshot_observed',
+        reference_kind: 'shared_reference',
+        object_id: 2,
+        parent_id: 0,
+        depth: 1,
+        child_index: 9,
+        target_observation_index: 2
+    }])
+    assert.ok(largeEvents.every(event =>
+        event.data.projection === 'mix_console_root_children_v1' &&
+        event.data.scope_depth === 1 &&
+        event.data.scope_complete === true &&
+        event.data.host_graph_complete === false &&
+        event.data.root_child_count === 10 &&
+        event.data.authoritative_for_track_enumeration === false &&
+        event.data.observation_items === 10 &&
+        event.data.reference_items === 1 &&
+        event.data.cycle_count === 0 &&
+        event.data.shared_reference_count === 1 &&
+        event.data.total_items === 11 &&
+        event.data.truncated === false &&
+        event.data.truncation_reasons.length === 0
+    ))
+    assert.ok(largeHarness.calls.directGetters
+        .filter(call => call[0] === 'child')
+        .every(call => call[1] === 0))
+    assert.ok(largeHarness.calls.directGetters
+        .filter(call => !['base', 'child'].includes(call[0]))
+        .every(call => Number.isInteger(call[1]) && call[1] >= 0 && call[1] <= 9))
+    assert.equal(
+        largeObservations.some(item => item.depth > 1 || item.object_id >= 100),
+        false
+    )
+    assertSerializedSecretsAbsent(largeHarness, [
+        'Input github_pat_root_frontier_secret',
+        'ambient-secret-name',
+        'ambient-secret-id',
+        'root-secret',
+        'root-secret-id'
+    ])
+    assertSourceSequence(largeHarness)
 
-    const children = []
-    const childMap = { 0: children }
-    for (let index = 1; index <= 200; index += 1) {
-        children.push(index)
-        childMap[index] = []
-    }
-    const boundedHarness = createHarness({
+    const repeatHarness = createHarness({
         directAccessVersion: '1.3',
-        graph: { base: 0, children: childMap, metadata: {} }
+        graph: {
+            base: 0,
+            children: { 0: [0, 1, 1], 1: [99], 99: [] },
+            metadata: {}
+        }
     })
-    boundedHarness.activate()
-    boundedHarness.idle(2)
-
-    const boundedEvents = events(boundedHarness, 'probe.direct_access.chunk').filter(event =>
-        event.data.stream === 'direct_access_snapshot' &&
-        event.data.reason === 'page_activate'
+    repeatHarness.activate()
+    repeatHarness.idle(2)
+    const repeatEvents = events(repeatHarness, 'probe.direct_access.chunk').filter(event =>
+        event.data.stream === 'direct_access_snapshot'
     )
-    assert.equal(boundedEvents[0].data.total_items, 129)
-    assert.ok(boundedEvents.every(event => event.data.truncated === true))
-    assert.ok(boundedEvents[0].data.truncation_reasons.includes('child_count_limit'))
-    assert.ok(boundedEvents.every(event => event.data.items.length <= 2))
-    assert.equal(boundedEvents.at(-1).data.snapshot_complete, true)
-    assertSourceSequence(boundedHarness)
+    const repeatItems = repeatEvents.flatMap(event => event.data.items)
+    assert.deepEqual(
+        repeatItems
+            .filter(item => item.record_kind === 'observation')
+            .map(item => [item.object_id, item.depth, item.child_count, item.children_expanded]),
+        [[0, 0, 3, true], [1, 1, 1, false]]
+    )
+    assert.deepEqual(
+        repeatItems.filter(item => item.record_kind === 'object_reference'),
+        [
+            {
+                record_kind: 'object_reference',
+                observation_epoch: repeatEvents[0].data.observation_epoch,
+                observation_epoch_status: 'snapshot_observed',
+                reference_kind: 'ancestor_cycle',
+                object_id: 0,
+                parent_id: 0,
+                depth: 1,
+                child_index: 0,
+                target_observation_index: 0
+            },
+            {
+                record_kind: 'object_reference',
+                observation_epoch: repeatEvents[0].data.observation_epoch,
+                observation_epoch_status: 'snapshot_observed',
+                reference_kind: 'shared_reference',
+                object_id: 1,
+                parent_id: 0,
+                depth: 1,
+                child_index: 2,
+                target_observation_index: 1
+            }
+        ]
+    )
+    assert.ok(repeatEvents.every(event =>
+        event.data.scope_complete === true &&
+        event.data.root_child_count === 3 &&
+        event.data.observation_items === 2 &&
+        event.data.reference_items === 2 &&
+        event.data.cycle_count === 1 &&
+        event.data.shared_reference_count === 1 &&
+        event.data.total_items === 4 &&
+        event.data.truncated === false
+    ))
+    assert.equal(repeatItems.some(item => item.object_id === 99), false)
+    assert.equal(events(repeatHarness, 'probe.overflow').length, 0)
+    assertSourceSequence(repeatHarness)
+
+    function boundaryGraph(rootChildren) {
+        const childMap = { 0: [] }
+        for (let index = 1; index <= rootChildren; index += 1) {
+            childMap[0].push(index)
+            childMap[index] = []
+        }
+        return { base: 0, children: childMap, metadata: {} }
+    }
+
+    const acceptedBoundary = createHarness({
+        directAccessVersion: '1.3',
+        graph: boundaryGraph(128)
+    })
+    acceptedBoundary.activate()
+    acceptedBoundary.idle(2)
+    const acceptedEvents = events(acceptedBoundary, 'probe.direct_access.chunk').filter(
+        event => event.data.stream === 'direct_access_snapshot'
+    )
+    const acceptedItems = acceptedEvents.flatMap(event => event.data.items)
+    assert.equal(acceptedItems.length, 129)
+    assert.deepEqual(
+        acceptedItems.map(item => item.child_index),
+        [null, ...Array.from({ length: 128 }, (_, index) => index)]
+    )
+    assert.ok(acceptedEvents.every(event =>
+        event.data.scope_complete === true &&
+        event.data.root_child_count === 128 &&
+        event.data.observation_items === 129 &&
+        event.data.reference_items === 0 &&
+        event.data.total_items === 129 &&
+        event.data.truncated === false &&
+        event.data.truncation_reasons.length === 0
+    ))
+    assertSourceSequence(acceptedBoundary)
+
+    const rejectedBoundary = createHarness({
+        directAccessVersion: '1.3',
+        graph: boundaryGraph(129)
+    })
+    rejectedBoundary.activate()
+    rejectedBoundary.idle(2)
+    const rejectedEvents = events(rejectedBoundary, 'probe.direct_access.chunk').filter(
+        event => event.data.stream === 'direct_access_snapshot'
+    )
+    const rejectedItems = rejectedEvents.flatMap(event => event.data.items)
+    assert.equal(rejectedItems.length, 129)
+    assert.ok(rejectedEvents.every(event =>
+        event.data.scope_complete === false &&
+        event.data.root_child_count === 129 &&
+        event.data.observation_items === 129 &&
+        event.data.reference_items === 0 &&
+        event.data.total_items === 129 &&
+        event.data.truncated === true &&
+        event.data.truncation_reasons.length === 1 &&
+        event.data.truncation_reasons[0] === 'child_count_limit'
+    ))
+    assert.equal(
+        rejectedEvents.some(event => event.data.truncation_reasons.includes('node_limit')),
+        false
+    )
+    assertSourceSequence(rejectedBoundary)
 
     const largeErrorHarness = createHarness({
         directAccessVersion: '1.3',
@@ -2321,6 +2808,7 @@ function testApi13TypeCycleAndTraversalBounds() {
     assert.ok(errorChunks.length >= 1)
     assert.equal(errorChunks[0].data.total_items, 2)
     assert.equal(errorChunks.flatMap(event => event.data.items).length, 2)
+    assert.ok(errorChunks.every(event => event.data.scope_complete === true))
     assert.equal(events(largeErrorHarness, 'probe.overflow').length, 0)
     assertSourceSequence(largeErrorHarness)
 }
@@ -2348,6 +2836,6 @@ testOversizedHostIdsFailClosed()
 testDirectAccessUpdateCallbackIsCoalescedIntoCurrentSnapshot()
 testDirectAccessUpdateFailurePreventsReady()
 testDirectAccessDeactivateFailureIsFatal()
-testApi13TypeCycleAndTraversalBounds()
+testApi13RootChildrenProjectionAndBounds()
 
 console.log('Cubase Track probe script tests passed')

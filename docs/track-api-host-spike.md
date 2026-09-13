@@ -8,7 +8,7 @@ Input / Outputの未調査範囲には[既存I/O専用Probe](io-existing-channel
 
 校正の再試行単位と完了済み記録の扱いは[入力ガード校正の復旧手順](input-guard-calibration-recovery.md)を参照してください。校正の部分結果、offline test、CI成功は、この文書のruntime観測を完了させません。Issue #3に含まれるInput / Outputも、primary profileでのO1 skipとは区別して未完了として追跡します。
 
-このrevisionではread-onlyの静的preflightと、実機観測用Probe / collector / fail-closed auditorのoffline実装が完了しています。2026-08-28のCubase 15 formal attemptはE1で旧full-graph traversalがrepeat edgeを`cycle_detected` / `truncated`として停止したためinvalidであり、runtime結果へ採用しません。この失敗を新しいroot-child projectionで遡及的に成功へ変更せず、fresh collector、fresh run ID、修正版Probeで再実施します。したがって、観測欄の`PENDING`は成功、対応、非対応のいずれも意味しません。runtime表、比較、最終推奨、完了checklistが埋まるまでIssue #3をcloseしません。
+このrevisionではread-onlyの静的preflightと、実機観測用Probe / collector / fail-closed auditorのoffline実装が完了しています。2026-08-28のCubase 15 formal attemptはE1で旧full-graph traversalがrepeat edgeを`cycle_detected` / `truncated`として停止したためinvalidであり、runtime結果へ採用しません。この失敗を新しいroot-child projectionで遡及的に成功へ変更せず、fresh collector、fresh run ID、修正版Probeで再実施します。2026-09-13のCubase 15 formal-06 attemptは30 / 44 checkpoint、完全なpre / post evidenceを持つ18 / 63 UI actionまで進みましたが、`S2-add.project-menu`のmenu-open AX stateに対応するscreenshotをComputer Useから取得できなかったためinvalidです。AX-only結果、別applicationのwindow画像、合成画像で補わず、[Issue #39](https://github.com/ieee0824/cubase_mcp/issues/39)の解決前に再試行しません。したがって、観測欄の`PENDING`は成功、対応、非対応のいずれも意味しません。runtime表、比較、最終推奨、完了checklistが埋まるまでIssue #3をcloseしません。
 
 ## 結果class
 
@@ -92,6 +92,8 @@ Probeの`host_version`は`mDefaults.mAppVersion.getVersionString()`由来のrunt
 ## 安全条件とdata handling
 
 runtime runはfixtureの[安全条件](track-api-fixture.md#安全条件)と[Run終了時のcleanup](track-api-fixture.md#run終了時のcleanup)をすべて満たす場合だけ開始します。
+
+正式runの長いaction sequenceへ入る前に、対象versionのCubaseを使ったrepository外の使い捨てComputer Use preflightを行います。ネイティブProject menuが開いた状態でAX JSONと同時点の復号可能なscreenshotを同じ取得結果から保存できなければ、formal collector / input guardを開始しません。preflight後はmenuを閉じ、Cubaseを完全に停止してprocess不在を再確認します。preflightの画像やstateはformal evidenceへ混ぜず、正式runのexactly 126 screenshot / 126 state要件を減らしません。
 
 1. 編集中の通常projectを保存して閉じ、Cubaseは対象versionを1 instanceだけ起動する。
 2. versionごとに専用の空projectからfixtureを作り、新しいCubaseで保存した`.cpr`を古いCubaseへ使い回さない。

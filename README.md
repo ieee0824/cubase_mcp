@@ -85,6 +85,8 @@ discoveryと実際のTool要求にはそれぞれ独立したtimeout期間を割
 
 実機調査向けの[入力ガード・証跡保存・校正手順](docs/input-guard-calibration-recovery.md)を用意しています。ガードの実入力観測はmacOS専用です。これらは独立した調査補助であり、本番MCP Toolから自動起動されません。実機校正とTrack APIの受入結果は別に確認します。
 
+既存Input / Outputを変更しない補助調査には、独立した[読み取り専用I/O Probe](docs/io-existing-channels-probe.md)を用意しています。実機挙動は未確認で、本番Toolやprimary Track Probeの代替ではありません。
+
 `--install-track-probe`は[Track Host API実機スパイク](docs/track-api-host-spike.md)専用であり、通常利用の`CubaseMCP` scriptを置き換えません。すべてのCubase instanceを正常終了し、対象製品の既存`MIDI Remote/Driver Scripts/Local` directoryを1つだけ指定して実行します。
 
 ```text
@@ -100,6 +102,8 @@ rootを省略できるのはCubase製品の候補がexactly 1件の場合だけ�
 ## ビルドとテスト
 
 Rust 1.95以降のtoolchainが必要です（Rust 2024 edition）。
+
+テスト実行にはNode.jsも必要です。collectorと実JavaScriptコードのオフライン結合テストに使用します。
 
 ```bash
 cargo build --release

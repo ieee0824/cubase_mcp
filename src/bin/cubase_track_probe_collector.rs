@@ -22,6 +22,8 @@ use sha2::{Digest, Sha256};
 
 const TO_CUBASE_PORT: &str = "Cubase MCP Track Probe To Cubase";
 const FROM_CUBASE_PORT: &str = "Cubase MCP Track Probe From Cubase";
+const IO_TO_CUBASE_PORT: &str = "Cubase MCP IO Probe To Cubase";
+const IO_FROM_CUBASE_PORT: &str = "Cubase MCP IO Probe From Cubase";
 const PROBE_SYSEX_HEADER: [u8; 7] = [0xF0, 0x7D, b'C', b'M', b'T', b'P', 0x01];
 // Cubase sends the Universal Non-Realtime broadcast Identity Request when a
 // new virtual MIDI output appears. It is transport discovery traffic, not a
@@ -135,37 +137,13 @@ fn run() -> Result<bool, String> {
     let sink = Arc::new(JsonlSink::stdout(config.run_id.clone(), started_at));
     let session_id = new_session_id();
 
-    sink.emit(&json!({
-        "record_type": "collector_started",
-        "timestamp_unix_ms": unix_timestamp_ms(),
-        "session_id": session_id,
-        "collector_version": env!("CARGO_PKG_VERSION"),
-        "collector_binary_sha256": collector_binary_sha256,
-        "probe_transport_version": PROBE_TRANSPORT_VERSION,
-        "midi_mode": mode,
-        "virtual_to_cubase_port": (mode == "virtual").then_some(TO_CUBASE_PORT),
-        "virtual_from_cubase_port": (mode == "virtual").then_some(FROM_CUBASE_PORT),
-        "configured_midi_input_port": if mode == "existing" {
-            config.midi_input.as_deref()
-        } else {
-            None
-        },
-        "configured_midi_output_port": if mode == "existing" {
-            config.midi_output.as_deref()
-        } else {
-            None
-        },
-        "resolved_midi_input_port": resolved_input_port,
-        "resolved_midi_output_port": resolved_output_port,
-        "max_json_bytes": MAX_JSON_BYTES,
-        "max_sysex_bytes": MAX_SYSEX_BYTES,
-        "max_outbound_json_bytes": MAX_OUTBOUND_JSON_BYTES,
-        "queue_capacity": MIDI_QUEUE_CAPACITY,
-        "ingress_barrier_timeout_ms": duration_ms(INGRESS_BARRIER_TIMEOUT),
-        "checkpoint_quiet_period_ms": duration_ms(CHECKPOINT_QUIET_PERIOD),
-        "graceful_drain_timeout_ms": duration_ms(config.graceful_drain),
-        "discovery_window_ms": duration_ms(config.discovery_window)
-    }))
+    sink.emit(&config.started_record(
+        &session_id,
+        &collector_binary_sha256,
+        mode,
+        &resolved_input_port,
+        &resolved_output_port,
+    ))
     .map_err(|error| format!("could not write collector start record: {error}"))?;
 
     let collector_sink = Arc::clone(&sink);
@@ -189,7 +167,7 @@ fn run() -> Result<bool, String> {
 
     let command_report = process_stdin_commands(
         io::stdin().lock(),
-        &mut output,
+        &mut |frame| output.send(frame),
         &session_id,
         CommandEnvironment {
             integrity_failed: &integrity_failed,
@@ -234,6 +212,26 @@ fn run() -> Result<bool, String> {
         }
     };
 
+    finish_collection(
+        &session_id,
+        &integrity_failed,
+        &sink,
+        &runtime,
+        &command_report,
+        &drain_report,
+        &collector_report,
+    )
+}
+
+fn finish_collection(
+    session_id: &str,
+    integrity_failed: &AtomicBool,
+    sink: &JsonlSink,
+    runtime: &RuntimeTracker,
+    command_report: &CommandReport,
+    drain_report: &DrainReport,
+    collector_report: &CollectorReport,
+) -> Result<bool, String> {
     let (tracker_summary, orphan_messages, final_quiescent, final_incomplete) = {
         let tracker = runtime.state.lock().unwrap_or_else(|error| {
             integrity_failed.store(true, Ordering::Release);
@@ -249,7 +247,7 @@ fn run() -> Result<bool, String> {
     if orphan_messages > 0 {
         integrity_failed.store(true, Ordering::Release);
         let _ = emit_diagnostic(
-            &sink,
+            sink,
             "ORPHAN_MESSAGES_OBSERVED",
             "fatal",
             "one or more probe messages were observed outside a checkpoint",
@@ -259,7 +257,7 @@ fn run() -> Result<bool, String> {
     if drain_report.completed && !final_quiescent {
         integrity_failed.store(true, Ordering::Release);
         let _ = emit_diagnostic(
-            &sink,
+            sink,
             "SHUTDOWN_PROTOCOL_INCOMPLETE",
             "fatal",
             "protocol work arrived after graceful drain completion and remained incomplete",
@@ -318,9 +316,47 @@ fn run() -> Result<bool, String> {
     Ok(exit_ok)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeProfile {
+    Primary,
+    IoExistingV1,
+}
+
+impl ProbeProfile {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "primary" => Ok(Self::Primary),
+            "io-existing-v1" => Ok(Self::IoExistingV1),
+            _ => Err("--profile must be primary or io-existing-v1".into()),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Primary => "primary",
+            Self::IoExistingV1 => "io-existing-v1",
+        }
+    }
+
+    fn virtual_output_port(self) -> &'static str {
+        match self {
+            Self::Primary => TO_CUBASE_PORT,
+            Self::IoExistingV1 => IO_TO_CUBASE_PORT,
+        }
+    }
+
+    fn virtual_input_port(self) -> &'static str {
+        match self {
+            Self::Primary => FROM_CUBASE_PORT,
+            Self::IoExistingV1 => IO_FROM_CUBASE_PORT,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Config {
     run_id: String,
+    profile: ProbeProfile,
     midi_input: Option<String>,
     midi_output: Option<String>,
     graceful_drain: Duration,
@@ -335,6 +371,44 @@ enum CliAction {
 }
 
 impl Config {
+    fn started_record(
+        &self,
+        session_id: &str,
+        collector_binary_sha256: &str,
+        mode: &str,
+        resolved_input_port: &str,
+        resolved_output_port: &str,
+    ) -> Value {
+        let mut record = json!({
+            "record_type": "collector_started",
+            "timestamp_unix_ms": unix_timestamp_ms(),
+            "session_id": session_id,
+            "collector_version": env!("CARGO_PKG_VERSION"),
+            "collector_binary_sha256": collector_binary_sha256,
+            "probe_transport_version": PROBE_TRANSPORT_VERSION,
+            "midi_mode": mode,
+            "virtual_to_cubase_port": (mode == "virtual").then_some(self.profile.virtual_output_port()),
+            "virtual_from_cubase_port": (mode == "virtual").then_some(self.profile.virtual_input_port()),
+            "configured_midi_input_port": if mode == "existing" { self.midi_input.as_deref() } else { None },
+            "configured_midi_output_port": if mode == "existing" { self.midi_output.as_deref() } else { None },
+            "resolved_midi_input_port": resolved_input_port,
+            "resolved_midi_output_port": resolved_output_port,
+            "max_json_bytes": MAX_JSON_BYTES,
+            "max_sysex_bytes": MAX_SYSEX_BYTES,
+            "max_outbound_json_bytes": MAX_OUTBOUND_JSON_BYTES,
+            "queue_capacity": MIDI_QUEUE_CAPACITY,
+            "ingress_barrier_timeout_ms": duration_ms(INGRESS_BARRIER_TIMEOUT),
+            "checkpoint_quiet_period_ms": duration_ms(CHECKPOINT_QUIET_PERIOD),
+            "graceful_drain_timeout_ms": duration_ms(self.graceful_drain),
+            "discovery_window_ms": duration_ms(self.discovery_window)
+        });
+        // Preserve the primary profile's existing exact-key audit schema.
+        if self.profile == ProbeProfile::IoExistingV1 {
+            record["probe_profile"] = json!(self.profile.as_str());
+        }
+        record
+    }
+
     fn from_process() -> Result<CliAction, String> {
         Self::parse(env::args().skip(1), cfg!(unix))
     }
@@ -346,6 +420,7 @@ impl Config {
         let mut arguments = arguments.into_iter();
         let mut config = Config {
             run_id: String::new(),
+            profile: ProbeProfile::Primary,
             midi_input: None,
             midi_output: None,
             graceful_drain: Duration::from_millis(DEFAULT_GRACEFUL_DRAIN_MS),
@@ -356,6 +431,10 @@ impl Config {
             match argument.as_str() {
                 "--run-id" => {
                     config.run_id = next_value(&mut arguments, "--run-id")?;
+                }
+                "--profile" => {
+                    config.profile =
+                        ProbeProfile::parse(&next_value(&mut arguments, "--profile")?)?;
                 }
                 "--midi-input" => {
                     config.midi_input = Some(next_value(&mut arguments, "--midi-input")?);
@@ -407,6 +486,7 @@ Usage: cubase_track_probe_collector [OPTIONS]
 
 Options:
   --run-id <ID>                    Required non-secret identifier written to every JSONL record
+  --profile <PROFILE>              primary (default) or io-existing-v1
   --midi-input <NAME>              Existing 'From Cubase' port (required with --midi-output)
   --midi-output <NAME>             Existing 'To Cubase' port (required with --midi-input)
   --drain-timeout-ms <MILLIS>      EOF graceful-drain deadline (default: 5000)
@@ -418,14 +498,22 @@ macOS/Linux default virtual ports:
   Cubase MCP Track Probe To Cubase
   Cubase MCP Track Probe From Cubase
 
+macOS/Linux --profile io-existing-v1 virtual ports:
+  Cubase MCP IO Probe To Cubase
+  Cubase MCP IO Probe From Cubase
+
 Windows requires both MIDI port options. On macOS/Linux, passing both options
 selects existing ports instead of creating the dedicated virtual ports.
+Explicit port options are used as supplied, regardless of the selected profile.
+The I/O profile is recorded as probe_profile in collector_started; primary keeps
+its existing record schema. Profile selection changes virtual port names, not
+CMTP framing or integrity checks.
 Cubase may poll a newly visible output with the exact Universal Identity Request
 F0 7E 7F 06 01 F7. The collector ignores only that six-byte transport request;
 every other foreign SysEx remains a fatal integrity error.
 
 stdin accepts one JSON command per line. The collector assigns the request id.
-This C15/DirectAccess-active example shows the required command order; perform
+This primary C15/DirectAccess-active example shows the required command order; perform
 the indicated host action and waits between lines rather than pasting it as a
 batch:
   {"method":"collector.checkpoint.begin","params":{"checkpoint_id":"INIT","window_ms":5000}}
@@ -454,6 +542,15 @@ it. A successful observation cut atomically emits its probe_response followed by
 the checkpoint's collector_action marker; do not send collector.action again.
 DirectAccess-unsupported runs omit only the DirectAccess snapshot. The revision
 2 fixture is authoritative for all 44 checkpoints.
+
+For the separate, read-only existing-I/O probe, launch:
+  cubase_track_probe_collector --run-id io-run-1 --profile io-existing-v1
+Use the io-existing-v1 probe's bank-only procedure, not the primary fixture or
+DirectAccess snapshot commands above. Its bank configurations are IO_INPUT_ALL
+and IO_OUTPUT_ALL, for example (after discovery and an active checkpoint):
+  {"target_instance_id":"@selected","method":"probe.bank.snapshot","params":{"config_id":"IO_INPUT_ALL"}}
+  {"target_instance_id":"@selected","method":"probe.bank.snapshot","params":{"config_id":"IO_OUTPUT_ALL"}}
+This profile does not create or edit buses.
 
 @selected is a collector-local alias. It is accepted only after a completed
 exactly-one discovery window and is replaced with that source at the MIDI send
@@ -510,7 +607,7 @@ fn connect_midi(
         (None, None) => {
             #[cfg(unix)]
             {
-                connect_virtual_ports(integrity_failed)
+                connect_virtual_ports(config.profile, integrity_failed)
             }
             #[cfg(not(unix))]
             {
@@ -522,11 +619,16 @@ fn connect_midi(
 }
 
 #[cfg(unix)]
-fn connect_virtual_ports(integrity_failed: Arc<AtomicBool>) -> Result<MidiConnections, String> {
+fn connect_virtual_ports(
+    profile: ProbeProfile,
+    integrity_failed: Arc<AtomicBool>,
+) -> Result<MidiConnections, String> {
+    let to_cubase_port = profile.virtual_output_port();
+    let from_cubase_port = profile.virtual_input_port();
     let output = MidiOutput::new("cubase-track-probe-collector-output")
         .map_err(|error| format!("could not initialize MIDI output: {error}"))?
-        .create_virtual(TO_CUBASE_PORT)
-        .map_err(|error| format!("could not create MIDI output '{TO_CUBASE_PORT}': {error}"))?;
+        .create_virtual(to_cubase_port)
+        .map_err(|error| format!("could not create MIDI output '{to_cubase_port}': {error}"))?;
 
     let mut input = MidiInput::new("cubase-track-probe-collector-input")
         .map_err(|error| format!("could not initialize MIDI input: {error}"))?;
@@ -536,7 +638,7 @@ fn connect_virtual_ports(integrity_failed: Arc<AtomicBool>) -> Result<MidiConnec
     let ingress_progress = Arc::new(IngressProgress::default());
     let input = input
         .create_virtual(
-            FROM_CUBASE_PORT,
+            from_cubase_port,
             receive_midi,
             MidiCallbackState {
                 sender,
@@ -546,7 +648,7 @@ fn connect_virtual_ports(integrity_failed: Arc<AtomicBool>) -> Result<MidiConnec
                 ingress_progress: Arc::clone(&ingress_progress),
             },
         )
-        .map_err(|error| format!("could not create MIDI input '{FROM_CUBASE_PORT}': {error}"))?;
+        .map_err(|error| format!("could not create MIDI input '{from_cubase_port}': {error}"))?;
 
     Ok(MidiConnections {
         output,
@@ -555,8 +657,8 @@ fn connect_virtual_ports(integrity_failed: Arc<AtomicBool>) -> Result<MidiConnec
         dropped_items,
         ingress_progress,
         mode: "virtual",
-        resolved_input_port: FROM_CUBASE_PORT.into(),
-        resolved_output_port: TO_CUBASE_PORT.into(),
+        resolved_input_port: from_cubase_port.into(),
+        resolved_output_port: to_cubase_port.into(),
     })
 }
 
@@ -1625,9 +1727,9 @@ struct CommandEnvironment<'a> {
     discovery_window: Duration,
 }
 
-fn process_stdin_commands(
+fn process_stdin_commands<E: fmt::Display>(
     mut reader: impl BufRead,
-    output: &mut MidiOutputConnection,
+    send: &mut impl FnMut(&[u8]) -> Result<(), E>,
     session_id: &str,
     environment: CommandEnvironment<'_>,
 ) -> CommandReport {
@@ -2023,7 +2125,7 @@ fn process_stdin_commands(
                         "request": &envelope,
                         "evidence_emission": "after_midi_send_attempt"
                     });
-                    let (send_result_record, midi_send_error) = match output.send(&frame) {
+                    let (send_result_record, midi_send_error) = match send(&frame) {
                         Ok(()) => {
                             let sent_at = Instant::now();
                             tracker.mark_request_sent(&request_id, sent_at, discovery_window);
@@ -2093,7 +2195,7 @@ fn process_stdin_commands(
 
                 let frame = frame.expect("validated probe request has an encoded MIDI frame");
 
-                match output.send(&frame) {
+                match send(&frame) {
                     Ok(()) => {
                         let sent_at = Instant::now();
                         tracker.mark_request_sent(&request_id, sent_at, discovery_window);
@@ -4963,7 +5065,8 @@ fn new_session_id() -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::io::{BufReader, Cursor};
+    use std::process::{Child, Command, Stdio};
     use std::sync::atomic::AtomicUsize;
     use std::sync::{Arc, Barrier, TryLockError, Weak};
 
@@ -4984,6 +5087,100 @@ mod tests {
     }
 
     struct FailingReader;
+
+    struct ChannelCommands {
+        receiver: Receiver<String>,
+        line: Cursor<Vec<u8>>,
+    }
+
+    impl Read for ChannelCommands {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let available = self.fill_buf()?;
+            let count = available.len().min(buffer.len());
+            buffer[..count].copy_from_slice(&available[..count]);
+            self.consume(count);
+            Ok(count)
+        }
+    }
+
+    impl BufRead for ChannelCommands {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            if self.line.position() as usize == self.line.get_ref().len() {
+                match self.receiver.recv_timeout(Duration::from_secs(10)) {
+                    Ok(line) => self.line = Cursor::new(format!("{line}\n").into_bytes()),
+                    Err(RecvTimeoutError::Disconnected) => return Ok(&[]),
+                    Err(RecvTimeoutError::Timeout) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "test command timeout",
+                        ));
+                    }
+                }
+            }
+            self.line.fill_buf()
+        }
+
+        fn consume(&mut self, amount: usize) {
+            self.line.consume(amount);
+        }
+    }
+
+    struct TestChild(Child);
+
+    impl TestChild {
+        fn wait(&mut self) -> std::process::ExitStatus {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(status) = self.0.try_wait().unwrap() {
+                    return status;
+                }
+                assert!(Instant::now() < deadline, "Node test helper timeout");
+                thread::sleep(Duration::from_millis(2));
+            }
+        }
+    }
+
+    impl Drop for TestChild {
+        fn drop(&mut self) {
+            if !matches!(self.0.try_wait(), Ok(Some(_))) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+
+    fn wait_for_pipeline_record(output: &Mutex<Vec<u8>>, predicate: impl Fn(&Value) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let bytes = {
+                let bytes = output.lock().unwrap();
+                let end = bytes
+                    .iter()
+                    .rposition(|byte| *byte == b'\n')
+                    .map_or(0, |index| index + 1);
+                bytes[..end].to_vec()
+            };
+            let records: Vec<Value> = String::from_utf8(bytes)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert!(
+                !records
+                    .iter()
+                    .any(|record| record["record_type"] == "collector_diagnostic"),
+                "unexpected collector diagnostic: {records:?}"
+            );
+            if records.iter().any(&predicate) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "pipeline record timeout: {records:?}"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
 
     impl Read for FailingReader {
         fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
@@ -6095,6 +6292,7 @@ mod tests {
             Config::parse(["--run-id".into(), "run-1".into()], true).unwrap(),
             CliAction::Run(Config {
                 run_id: "run-1".into(),
+                profile: ProbeProfile::Primary,
                 midi_input: None,
                 midi_output: None,
                 graceful_drain: Duration::from_millis(DEFAULT_GRACEFUL_DRAIN_MS),
@@ -6119,12 +6317,195 @@ mod tests {
             action,
             CliAction::Run(Config {
                 run_id: "run-2".into(),
+                profile: ProbeProfile::Primary,
                 midi_input: Some("From Cubase".into()),
                 midi_output: Some("To Cubase".into()),
                 graceful_drain: Duration::from_millis(DEFAULT_GRACEFUL_DRAIN_MS),
                 discovery_window: Duration::from_millis(DEFAULT_DISCOVERY_WINDOW_MS)
             })
         );
+    }
+
+    #[test]
+    fn primary_start_record_preserves_the_existing_exact_key_schema() {
+        let CliAction::Run(mut config) =
+            Config::parse(["--run-id", "start-schema-test"].map(String::from), true).unwrap()
+        else {
+            panic!("expected run config")
+        };
+        let primary = config.started_record(
+            "session",
+            &"a".repeat(64),
+            "virtual",
+            FROM_CUBASE_PORT,
+            TO_CUBASE_PORT,
+        );
+        let expected: HashSet<_> = [
+            "record_type",
+            "timestamp_unix_ms",
+            "session_id",
+            "collector_version",
+            "collector_binary_sha256",
+            "probe_transport_version",
+            "midi_mode",
+            "virtual_to_cubase_port",
+            "virtual_from_cubase_port",
+            "configured_midi_input_port",
+            "configured_midi_output_port",
+            "resolved_midi_input_port",
+            "resolved_midi_output_port",
+            "max_json_bytes",
+            "max_sysex_bytes",
+            "max_outbound_json_bytes",
+            "queue_capacity",
+            "ingress_barrier_timeout_ms",
+            "checkpoint_quiet_period_ms",
+            "graceful_drain_timeout_ms",
+            "discovery_window_ms",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            primary
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<HashSet<_>>(),
+            expected
+        );
+        assert_eq!(primary["virtual_to_cubase_port"], TO_CUBASE_PORT);
+        assert_eq!(primary["virtual_from_cubase_port"], FROM_CUBASE_PORT);
+        assert_eq!(primary["graceful_drain_timeout_ms"], 5000);
+        assert_eq!(primary["discovery_window_ms"], 1000);
+        config.profile = ProbeProfile::IoExistingV1;
+        let io = config.started_record(
+            "session",
+            &"a".repeat(64),
+            "virtual",
+            IO_FROM_CUBASE_PORT,
+            IO_TO_CUBASE_PORT,
+        );
+        assert_eq!(io["probe_profile"], "io-existing-v1");
+        assert_eq!(io.as_object().unwrap().len(), expected.len() + 1);
+        assert_eq!(io["virtual_to_cubase_port"], IO_TO_CUBASE_PORT);
+        assert_eq!(io["virtual_from_cubase_port"], IO_FROM_CUBASE_PORT);
+    }
+
+    #[test]
+    fn cli_accepts_both_profiles_and_selects_dedicated_virtual_port_names() {
+        for (name, expected, to_cubase, from_cubase) in [
+            (
+                "primary",
+                ProbeProfile::Primary,
+                "Cubase MCP Track Probe To Cubase",
+                "Cubase MCP Track Probe From Cubase",
+            ),
+            (
+                "io-existing-v1",
+                ProbeProfile::IoExistingV1,
+                "Cubase MCP IO Probe To Cubase",
+                "Cubase MCP IO Probe From Cubase",
+            ),
+        ] {
+            let CliAction::Run(config) = Config::parse(
+                ["--run-id", "profile-test", "--profile", name].map(String::from),
+                true,
+            )
+            .unwrap() else {
+                panic!("expected run action");
+            };
+            assert_eq!(config.profile, expected);
+            assert_eq!(config.profile.as_str(), name);
+            assert_eq!(config.profile.virtual_output_port(), to_cubase);
+            assert_eq!(config.profile.virtual_input_port(), from_cubase);
+            assert_eq!(config.midi_input, None);
+            assert_eq!(config.midi_output, None);
+            assert_eq!(
+                config.graceful_drain,
+                Duration::from_millis(DEFAULT_GRACEFUL_DRAIN_MS)
+            );
+            assert_eq!(
+                config.discovery_window,
+                Duration::from_millis(DEFAULT_DISCOVERY_WINDOW_MS)
+            );
+        }
+    }
+
+    #[test]
+    fn cli_profile_preserves_explicit_port_values_and_pair_requirement() {
+        for profile in ["primary", "io-existing-v1"] {
+            for virtual_supported in [false, true] {
+                let CliAction::Run(config) = Config::parse(
+                    [
+                        "--run-id",
+                        "existing-profile-test",
+                        "--profile",
+                        profile,
+                        "--midi-input",
+                        " Custom 入力 From ",
+                        "--midi-output",
+                        " Custom 出力 To ",
+                    ]
+                    .map(String::from),
+                    virtual_supported,
+                )
+                .unwrap() else {
+                    panic!("expected run action");
+                };
+                assert_eq!(config.profile.as_str(), profile);
+                assert_eq!(config.midi_input.as_deref(), Some(" Custom 入力 From "));
+                assert_eq!(config.midi_output.as_deref(), Some(" Custom 出力 To "));
+
+                assert!(
+                    Config::parse(
+                        [
+                            "--run-id",
+                            "missing-pair",
+                            "--profile",
+                            profile,
+                            "--midi-input",
+                            "From",
+                        ]
+                        .map(String::from),
+                        virtual_supported,
+                    )
+                    .unwrap_err()
+                    .contains("must be provided together")
+                );
+            }
+            assert!(
+                Config::parse(
+                    ["--run-id", "no-windows-ports", "--profile", profile].map(String::from),
+                    false,
+                )
+                .unwrap_err()
+                .contains("Windows requires explicit")
+            );
+        }
+    }
+
+    #[test]
+    fn cli_rejects_unknown_and_missing_profiles() {
+        for value in ["io", "IO-EXISTING-V1", "primary ", "--run-id"] {
+            assert_eq!(
+                Config::parse(
+                    ["--run-id", "invalid-profile", "--profile", value].map(String::from),
+                    true,
+                )
+                .unwrap_err(),
+                "--profile must be primary or io-existing-v1"
+            );
+        }
+        for arguments in [
+            vec!["--run-id", "missing-profile", "--profile"],
+            vec!["--run-id", "empty-profile", "--profile", ""],
+        ] {
+            assert_eq!(
+                Config::parse(arguments.into_iter().map(String::from), true).unwrap_err(),
+                "missing value for --profile"
+            );
+        }
     }
 
     #[test]
@@ -6462,6 +6843,324 @@ mod tests {
             panic!("expected discovery");
         };
         assert_eq!(observed_sources.len(), MAX_SOURCE_INSTANCES);
+    }
+
+    #[test]
+    fn actual_io_driver_frames_pass_collector_and_io_auditor_offline() {
+        for old_api in [true, false] {
+            let CliAction::Run(config) = Config::parse(
+                [
+                    "--run-id",
+                    "offline-io-pipeline",
+                    "--profile",
+                    "io-existing-v1",
+                    "--midi-input",
+                    "offline-fixture-input",
+                    "--midi-output",
+                    "offline-fixture-output",
+                    "--discovery-window-ms",
+                    "20",
+                    "--drain-timeout-ms",
+                    "20",
+                ]
+                .map(String::from),
+                false,
+            )
+            .unwrap() else {
+                panic!("expected run config")
+            };
+            let base = Instant::now();
+            let session_id = "offline-io-pipeline-session";
+            let collector_sha = current_executable_sha256().unwrap();
+            let buffer = Arc::new(Mutex::new(Vec::new()));
+            let sink = Arc::new(JsonlSink {
+                writer: Mutex::new(Box::new(SharedBuffer(Arc::clone(&buffer)))),
+                failed: AtomicBool::new(false),
+                run_id: config.run_id.clone(),
+                started_at: base,
+                record_prepare_hook: None,
+            });
+            // Real start builder with explicitly synthetic transport metadata;
+            // never claim a MIDI port or actual Cubase runtime existed.
+            sink.emit(&config.started_record(
+                session_id,
+                &collector_sha,
+                "offline_test",
+                "offline-fixture-input",
+                "offline-fixture-output",
+            ))
+            .unwrap();
+            let runtime = Arc::new(RuntimeTracker::new());
+            let failed = Arc::new(AtomicBool::new(false));
+            let dropped = Arc::new(AtomicU64::new(0));
+            let progress = Arc::new(IngressProgress::default());
+            let (frame_sender, frame_receiver) = mpsc::sync_channel(MIDI_QUEUE_CAPACITY);
+            let collector = {
+                let runtime = Arc::clone(&runtime);
+                let sink = Arc::clone(&sink);
+                let failed = Arc::clone(&failed);
+                let dropped = Arc::clone(&dropped);
+                let progress = Arc::clone(&progress);
+                thread::spawn(move || {
+                    collect_incoming(frame_receiver, dropped, failed, sink, runtime, progress)
+                })
+            };
+            let helper = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/helpers/io_probe_pipeline.js");
+            let mut driver = TestChild(
+                Command::new("node")
+                    .arg(&helper)
+                    .arg("driver")
+                    .arg(if old_api { "old" } else { "modern" })
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::inherit())
+                    .spawn()
+                    .expect("Node.js is required for the offline I/O integration test"),
+            );
+            let driver_input = Arc::new(Mutex::new(driver.0.stdin.take().unwrap()));
+            let driver_output = driver.0.stdout.take().unwrap();
+            let ingress = {
+                let failed = Arc::clone(&failed);
+                let dropped = Arc::clone(&dropped);
+                let progress = Arc::clone(&progress);
+                thread::spawn(move || {
+                    let mut input = BufReader::new(driver_output);
+                    let mut callback = MidiCallbackState {
+                        sender: frame_sender,
+                        framer: SysexFramer::default(),
+                        dropped_items: dropped,
+                        integrity_failed: failed,
+                        ingress_progress: progress,
+                    };
+                    while let Some(line) =
+                        read_bounded_line(&mut input, MAX_SYSEX_BYTES * 4).unwrap()
+                    {
+                        assert!(line.len() <= MAX_SYSEX_BYTES * 4);
+                        let frame: Vec<u8> = serde_json::from_slice(&line).unwrap();
+                        // Use the same callback, framing, queue and runtime drain
+                        // as real MIDI. The Node driver owns every source byte.
+                        receive_midi(0, &frame, &mut callback);
+                    }
+                    assert!(!callback.framer.has_partial_frame());
+                })
+            };
+            let (commands, command_input) = mpsc::channel();
+            let command_worker = {
+                let runtime = Arc::clone(&runtime);
+                let sink = Arc::clone(&sink);
+                let failed = Arc::clone(&failed);
+                let progress = Arc::clone(&progress);
+                let driver_input = Arc::clone(&driver_input);
+                let discovery_window = config.discovery_window;
+                thread::spawn(move || {
+                    process_stdin_commands(
+                        ChannelCommands {
+                            receiver: command_input,
+                            line: Cursor::new(Vec::new()),
+                        },
+                        &mut |frame: &[u8]| {
+                            let mut writer = driver_input.lock().unwrap();
+                            writeln!(writer, "{}", json!({"frame": frame}))?;
+                            writer.flush()
+                        },
+                        session_id,
+                        CommandEnvironment {
+                            integrity_failed: &failed,
+                            sink: &sink,
+                            runtime: &runtime,
+                            ingress_progress: &progress,
+                            discovery_window,
+                        },
+                    )
+                })
+            };
+            commands
+                .send(
+                    json!({"method":"collector.checkpoint.begin",
+                "params":{"checkpoint_id":"IO", "window_ms":1}})
+                    .to_string(),
+                )
+                .unwrap();
+            commands
+                .send(
+                    json!({"method":"collector.action", "params":{"checkpoint_id":"IO"}})
+                        .to_string(),
+                )
+                .unwrap();
+            wait_for_pipeline_record(&buffer, |record| {
+                record["record_type"] == "collector_action"
+            });
+            writeln!(driver_input.lock().unwrap(), "{}", json!({"start":true})).unwrap();
+            wait_for_pipeline_record(&buffer, |record| {
+                record["message"]["event"] == "probe.ready"
+            });
+            commands
+                .send(json!({"method":"probe.discover", "params":{}}).to_string())
+                .unwrap();
+            wait_for_pipeline_record(&buffer, |record| {
+                record["record_type"] == "collector_discovery_completed"
+            });
+            commands.send(json!({"target_instance_id":"@selected", "method":"probe.capabilities.get", "params":{}}).to_string()).unwrap();
+            wait_for_pipeline_record(&buffer, |record| {
+                record["record_type"] == "probe_response"
+                    && record["message"]["result"]["configs"].is_array()
+            });
+            for (config_id, method, reason) in [
+                ("IO_INPUT_ALL", "probe.bank.snapshot", "command_snapshot"),
+                ("IO_OUTPUT_ALL", "probe.bank.snapshot", "command_snapshot"),
+                ("IO_INPUT_ALL", "probe.bank.next", "command_next"),
+            ] {
+                commands
+                    .send(
+                        json!({"target_instance_id":"@selected", "method":method,
+                    "params":{"config_id":config_id}})
+                        .to_string(),
+                    )
+                    .unwrap();
+                wait_for_pipeline_record(&buffer, |record| {
+                    record["message"]["event"] == "probe.bank.chunk"
+                        && record["message"]["data"]["config_id"] == config_id
+                        && record["message"]["data"]["reason"] == reason
+                        && record["message"]["data"]["snapshot_complete"] == true
+                });
+            }
+            // Observe the actual quiet period; do not advance clocks or replace
+            // recorded times to make checkpoint closure pass.
+            thread::sleep(CHECKPOINT_QUIET_PERIOD + Duration::from_millis(20));
+            commands
+                .send(
+                    json!({"method":"collector.checkpoint.end", "params":{"checkpoint_id":"IO"}})
+                        .to_string(),
+                )
+                .unwrap();
+            wait_for_pipeline_record(&buffer, |record| {
+                record["record_type"] == "collector_checkpoint" && record["phase"] == "end"
+            });
+            drop(commands);
+            let command_report = command_worker.join().unwrap();
+            let drain_report = graceful_drain(&runtime, config.graceful_drain, &sink, &failed);
+            drop(driver_input);
+            assert!(driver.wait().success());
+            ingress.join().unwrap();
+            let collector_report = collector.join().unwrap();
+            assert!(
+                finish_collection(
+                    session_id,
+                    &failed,
+                    &sink,
+                    &runtime,
+                    &command_report,
+                    &drain_report,
+                    &collector_report
+                )
+                .unwrap()
+            );
+            let raw = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+            assert!(!raw.contains("PRIVATE_BUS_SECRET"));
+            let records: Vec<Value> = raw
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let queued_feedback = records
+                .iter()
+                .find(|record| {
+                    record["message"]["event"] == "probe.io.feedback"
+                        && record["message"]["data"]["generation"] == 1
+                        && record["message"]["data"]["observation_id"] == 2
+                })
+                .expect("the pre-navigation host callback must not be discarded");
+            let navigation_response = records
+                .iter()
+                .find(|record| record["message"]["result"]["action"] == "next")
+                .expect("navigation must complete through the real driver");
+            assert_eq!(queued_feedback["message"]["data"]["item"]["slot_index"], 1);
+            assert_eq!(
+                queued_feedback["message"]["data"]["item"]["title_alias"],
+                "title-2"
+            );
+            assert!(
+                queued_feedback["source_seq"].as_u64().unwrap()
+                    < navigation_response["source_seq"].as_u64().unwrap(),
+                "generation-1 feedback must precede the generation-2 navigation response (old_api={old_api})"
+            );
+            let new_feedback: Vec<_> = records
+                .iter()
+                .filter(|record| {
+                    record["message"]["event"] == "probe.io.feedback"
+                        && record["message"]["data"]["generation"] == 2
+                })
+                .collect();
+            assert_eq!(new_feedback.len(), 8);
+            let first_navigation_chunk = records
+                .iter()
+                .find(|record| {
+                    record["message"]["event"] == "probe.bank.chunk"
+                        && record["message"]["data"]["reason"] == "command_next"
+                })
+                .unwrap();
+            for feedback in new_feedback {
+                assert!(
+                    navigation_response["source_seq"].as_u64().unwrap()
+                        < feedback["source_seq"].as_u64().unwrap()
+                );
+                assert!(
+                    feedback["source_seq"].as_u64().unwrap()
+                        < first_navigation_chunk["source_seq"].as_u64().unwrap()
+                );
+            }
+            let mut auditor = TestChild(
+                Command::new("node")
+                    .arg(&helper)
+                    .arg("audit")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::inherit())
+                    .spawn()
+                    .unwrap(),
+            );
+            let audit_stdout = auditor.0.stdout.take().unwrap();
+            let audit_output = thread::spawn(move || {
+                let mut result = String::new();
+                audit_stdout
+                    .take(65537)
+                    .read_to_string(&mut result)
+                    .unwrap();
+                assert!(result.len() <= 65536, "audit report exceeds the test bound");
+                result
+            });
+            {
+                let mut input = auditor.0.stdin.take().unwrap();
+                write!(
+                    input,
+                    "{}",
+                    json!({"raw":raw,"collector_sha256":collector_sha,"old_api":old_api})
+                )
+                .unwrap();
+            }
+            assert!(
+                auditor.wait().success(),
+                "actual collector records failed the I/O auditor"
+            );
+            let result = audit_output.join().unwrap();
+            let result: Value = serde_json::from_str(&result).unwrap();
+            assert_eq!(result["counts"]["snapshots"], 3);
+            assert_eq!(result["runtime_acceptance"], "pending_ui_review");
+            assert_eq!(result["complete"], false);
+            assert_eq!(result["snapshots"][2]["generation"], 2);
+            for item in result["snapshots"][2]["items"].as_array().unwrap() {
+                assert_eq!(item["title_observed"], true);
+                assert_eq!(item["title_state"], "nonempty");
+                assert_eq!(item["title_alias"], "title-1");
+            }
+            let item = &result["snapshots"][0]["items"][1];
+            assert_eq!(item["title_state"], "unobserved");
+            assert_eq!(item["title_alias"], Value::Null);
+            assert_eq!(
+                item["host_id_status"],
+                if old_api { "unsupported" } else { "supported" }
+            );
+        }
     }
 
     #[test]
@@ -7566,6 +8265,13 @@ mod tests {
         let help = Config::help();
         assert!(help.contains(TO_CUBASE_PORT));
         assert!(help.contains(FROM_CUBASE_PORT));
+        assert!(help.contains(IO_TO_CUBASE_PORT));
+        assert!(help.contains(IO_FROM_CUBASE_PORT));
+        assert!(help.contains("--profile io-existing-v1"));
+        assert!(help.contains("primary (default) or io-existing-v1"));
+        assert!(help.contains("I/O profile is recorded as probe_profile in collector_started"));
+        assert!(help.contains("IO_INPUT_ALL"));
+        assert!(help.contains("IO_OUTPUT_ALL"));
         assert!(help.contains("JSON Lines"));
         assert!(help.contains("Ctrl-D"));
         assert!(help.contains("--run-id"));

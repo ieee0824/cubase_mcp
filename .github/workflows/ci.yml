@@ -70,7 +70,9 @@ jobs:
           node --test tests/input_guard_sampling_checker.test.js
 
       - name: Run Rust tests
-        run: cargo test --all-targets --locked
+        run: |
+          node --version
+          cargo test --all-targets --locked
 
       - name: Build release binaries
         run: cargo build --release --locked
@@ -91,3 +93,6 @@ jobs:
         run: |
           node tests/midi_remote_script.test.js
           node tests/track_probe_script.test.js
+          node tests/io_profile.test.js
+          node tests/io_probe_script.test.js
+          node tests/io_probe_audit.test.js

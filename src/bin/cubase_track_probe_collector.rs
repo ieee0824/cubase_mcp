@@ -6858,8 +6858,6 @@ mod tests {
                     "offline-fixture-input",
                     "--midi-output",
                     "offline-fixture-output",
-                    "--discovery-window-ms",
-                    "20",
                     "--drain-timeout-ms",
                     "20",
                 ]
@@ -6869,6 +6867,12 @@ mod tests {
             .unwrap() else {
                 panic!("expected run config")
             };
+            // A real Node child and pipes need the normal discovery budget;
+            // a 20 ms shortcut races OS scheduling, especially on Windows CI.
+            assert_eq!(
+                config.discovery_window,
+                Duration::from_millis(DEFAULT_DISCOVERY_WINDOW_MS)
+            );
             let base = Instant::now();
             let session_id = "offline-io-pipeline-session";
             let collector_sha = current_executable_sha256().unwrap();

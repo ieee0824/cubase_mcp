@@ -27,6 +27,15 @@ if (process.argv[2] === 'driver') {
             assert.ok(Array.isArray(command.frame))
             const request = wire.decode(command.frame, 4096)
             assert.ok(request)
+            // Exercise cross-process latency beyond the old 20 ms test budget.
+            // The collector must observe the real delay, not patched timestamps.
+            if (request.message.method === 'probe.discover') {
+                setTimeout(() => {
+                    h.input.mOnSysex(h.device, command.frame)
+                    h.idle()
+                }, 50)
+                return
+            }
             if (request.message.method === 'probe.bank.next') {
                 assert.equal(request.message.params.config_id, 'IO_INPUT_ALL')
                 // A host callback may arrive after the preceding idle but before

@@ -58,11 +58,31 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo clippy --all-targets --locked -- -D warnings
 
+      - name: Check input-guard scripts
+        if: runner.os == 'Linux'
+        run: |
+          bash -n scripts/check-input-guard-calibration.sh
+          bash -n scripts/check-input-guard-sampling.sh
+          bash -n scripts/start-input-guard.sh
+          node tests/finder_calibration_state.test.js
+          node --test tests/input_guard_sampling_checker.test.js
+
       - name: Run Rust tests
         run: cargo test --all-targets --locked
 
       - name: Build release binaries
         run: cargo build --release --locked
+
+      - name: Test Computer Use capture recorder
+        run: node --test tests/cua_capture_recorder.test.js
+
+      - name: Test input guard launch handshake
+        if: runner.os != 'Windows'
+        run: node --test tests/input_guard_launcher.test.js
+
+      - name: Test macOS input-guard evidence checker
+        if: runner.os == 'macOS'
+        run: node tests/input_guard_calibration_checker.test.js
 
       - name: Test Cubase MIDI Remote script
         if: runner.os == 'Linux'

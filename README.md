@@ -83,6 +83,8 @@ discoveryと実際のTool要求にはそれぞれ独立したtimeout期間を割
 
 ### Track API調査用Probe
 
+実機調査向けの[入力ガード・証跡保存・校正手順](docs/input-guard-calibration-recovery.md)を用意しています。ガードの実入力観測はmacOS専用です。これらは独立した調査補助であり、本番MCP Toolから自動起動されません。実機校正とTrack APIの受入結果は別に確認します。
+
 `--install-track-probe`は[Track Host API実機スパイク](docs/track-api-host-spike.md)専用であり、通常利用の`CubaseMCP` scriptを置き換えません。すべてのCubase instanceを正常終了し、対象製品の既存`MIDI Remote/Driver Scripts/Local` directoryを1つだけ指定して実行します。
 
 ```text

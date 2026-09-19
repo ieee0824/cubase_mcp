@@ -91,6 +91,36 @@ assert.equal(
 )
 assert.equal(clickActionCount, 46)
 
+// Save As is one checkpoint, but three independently guarded UI calls.
+const saveAsActionIds = ['S0.save-as-shortcut', 'S0.save-as-name', 'S0.save-as-confirm']
+const saveAsIndices = checkpoints.flatMap((checkpoint, index) => checkpoint === 'S0' ? [index] : [])
+assert.deepEqual(saveAsIndices.map(index => actionIds[index]), saveAsActionIds)
+assert.deepEqual(saveAsIndices.map(index => apis[index]), [
+    'computer_use.press_key', 'computer_use.set_value', 'computer_use.click.element'
+])
+const fixtureDocument = fs.readFileSync(
+    path.join(__dirname, '..', 'docs', 'track-api-fixture.md'), 'utf8'
+)
+const mutationProcedure = fixtureDocument.split('## Case M1: mutation sequence')[1].split('\n## ')[0]
+for (const actionId of saveAsActionIds) {
+    assert.ok(mutationProcedure.includes(actionId), `M1 procedure must document guarded action ${actionId}`)
+}
+for (const [checkpoint, expectedIds, expectedApis] of [
+    ['R1', ['R1.studio-menu', 'R1.midi-remote-manager', 'R1.scripts-tab', 'R1.reload-scripts'],
+        ['computer_use.click.element', 'computer_use.click.element', 'computer_use.click.coordinate', 'computer_use.click.coordinate']],
+    ['R2', ['R2.cubase-menu', 'R2.quit-item', 'R2.launch-baseline'],
+        ['computer_use.click.element', 'computer_use.click.element', 'exec_command.open']]
+]) {
+    const indices = checkpoints.flatMap((value, index) => value === checkpoint ? [index] : [])
+    assert.deepEqual(indices.map(index => actionIds[index]), expectedIds)
+    assert.deepEqual(indices.map(index => apis[index]), expectedApis)
+    const procedureRow = fixtureDocument.split('\n').find(line => line.startsWith(`| ${checkpoint} |`))
+    assert.ok(procedureRow, `missing ${checkpoint} procedure`)
+    for (const actionId of expectedIds) {
+        assert.ok(procedureRow.includes(actionId), `${checkpoint} procedure must document guarded action ${actionId}`)
+    }
+}
+
 assert.equal(activationDialogText, 'プロジェクトをアクティブにしますか？')
 assert.equal(affirmativeIdentity, 'ボタン 有効化, ID: action-button-1')
 assert.equal(negativeIdentity, 'ボタン いいえ, ID: action-button-2')

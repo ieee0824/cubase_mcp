@@ -419,7 +419,7 @@ Cubase 15、およびruntime capabilityがDirectAccessをsupported / activeと�
 ## Case M1: mutation sequence
 
 1. C1 baselineを開く。
-2. `S0` checkpointを開始してaction markerを記録し、その後のarm / armedとfresh pre-stateを完了してからexactly 1 UI callで`CMCP_TrackFixture_Mutation.cpr`として別名保存する。fresh post-stateとcheck / resultまでを同じcheckpointへ収め、Save Asに伴うcallbackをcheckpoint外へ出さない。
+2. `S0` checkpointを開始してaction markerを1件記録し、`S0.save-as-shortcut`（Save As shortcut）、`S0.save-as-name`（`CMCP_TrackFixture_Mutation.cpr`の名前入力）、`S0.save-as-confirm`（確定button）の3 actionをこの順に実行する。各actionを独立したarm / armed → fresh pre-state → exactly 1 UI call → fresh post-state → check / resultでguardし、3 callを1つのarm/checkへまとめない。全actionとSave Asに伴うcallbackを同じ`S0` checkpointへ収め、markerは追加しない。
 3. 保存後の安定した初期snapshotを同じ`S0`として記録する。
 4. P10だけを選択し、準備操作のselection差分を`S1-select`として記録する。
 5. P10を`CMCP_10_RENAMED_変更後`へrenameし、`S1-rename`を記録する。
@@ -463,8 +463,8 @@ script reloadとCubase再起動はbaseline作成へ混ぜず、C1を開いた独
 
 | phase | 手順 | checkpoint |
 | --- | --- | --- |
-| R1 | `S9-baseline`のfinal snapshotをpre-reload Probe状態として固定 → checkpoint begin / action marker → arm / armed → fresh UI pre → Reload Scripts exactly 1 call → fresh UI post → check / result → 新しいload / reinitialize marker → 再discover → actionから5000 ms以上観測 → 明示的C1 final snapshot | callback再初期化、reload前後のID比較 |
-| R2 | R1のfinal snapshotをpre-restart Probe状態として固定 → checkpoint begin / action marker → normal quitをarm / armed → fresh UI pre → exactly 1 call → fresh UI post → check / resultでguard → process不在を確認 → 同じversionとC1のlaunchも別action IDで同じguard順序を完了 → ready → 再discover → actionから5000 ms以上観測 → 明示的final snapshot | restart後のID、初期callback、接続状態。process不在からのlaunchなのでActivate dialogは許可しない |
+| R1 | `S9-baseline`のfinal snapshotをpre-reload Probe状態として固定 → checkpoint begin / action marker → `R1.studio-menu` → `R1.midi-remote-manager` → `R1.scripts-tab` → `R1.reload-scripts` → 新しいload / reinitialize marker → 再discover → markerから5000 ms以上観測 → 明示的C1 final snapshot。4 UI actionそれぞれを独立したarm / armed → fresh pre → exactly 1 call → fresh post → check / resultでguardし、markerは共有する | callback再初期化、reload前後のID比較 |
+| R2 | R1のfinal snapshotをpre-restart Probe状態として固定 → checkpoint begin / action marker → `R2.cubase-menu` → `R2.quit-item` → process不在を確認 → `R2.launch-baseline`で同じversionとC1を1回のOS openで起動 → ready → 再discover → markerから5000 ms以上観測 → 明示的final snapshot。3 UI actionそれぞれを独立したarm / armed → fresh pre → exactly 1 call → fresh post → check / resultでguardし、markerは共有する | restart後のID、初期callback、接続状態。process不在からのlaunchなのでActivate dialogは許可しない |
 
 R1/R2の`reconnect_deadline_ms`は既定`30000`とし、action markerから新sessionのreadyと再discover完了までへ適用します。final snapshotはactionから5000 ms以上かつready / discovery後に行い、ready / discovery完了から`10000 ms`以内に完了させます。30秒のreconnect期限へ追加観測時間を混ぜず、期限内にready / discoveryを確認できなければ、そのphaseを`INCONCLUSIVE_RECONNECT_TIMEOUT`として停止します。R1/R2内でpre-action snapshot commandを重複実行せず、直前checkpointの監査済みfinal snapshotをpre-stateとして参照します。R1/R2は未保存の通常projectがないことを再確認してから行います。IDの維持・変更は観測値であり、このfixtureのpass条件にはしません。
 

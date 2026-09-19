@@ -876,7 +876,7 @@ mod tests {
     fn embedded_track_probe_digest_matches_reviewed_source() {
         assert_eq!(
             sha256_hex(TRACK_PROBE_SCRIPT),
-            "e665a7914b71e38730318bb02854aedb22e44432f754cb36d684d8aaed02f390"
+            "7629d96cfc40a6b6928ff952a5ced17699714b12f146cf9ec2abdf97695b275c"
         );
     }
 

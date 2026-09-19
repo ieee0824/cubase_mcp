@@ -1,6 +1,6 @@
 # 入力ガード・証跡保存・校正の復旧手順
 
-この手順は[分割計画A / Issue #41](https://github.com/ieee0824/cubase_mcp/issues/41)の独立した調査補助を対象にします。本番MCP Toolから自動起動されません。Track Probe / collector / auditorとの正式run統合は[分割計画B](https://github.com/ieee0824/cubase_mcp/issues/42)、I/O調査基盤は[計画C](https://github.com/ieee0824/cubase_mcp/issues/43)で扱います。
+この手順は[分割計画A / Issue #41](https://github.com/ieee0824/cubase_mcp/issues/41)の独立した調査補助を対象にします。本番MCP Toolから自動起動されません。Track Probe / collector / auditorとの正式run統合と証跡checkerは[Track fixture](track-api-fixture.md)を参照してください。I/O調査基盤は後続の[計画C](https://github.com/ieee0824/cubase_mcp/issues/43)で扱います。
 
 過去の実測校正採用は[Issue #35](https://github.com/ieee0824/cubase_mcp/issues/35)に記録されています。このコード抽出やCI合格は、新しい操作サービス・権限・起動contextでの校正合格を意味しません。既存原本の所在と再利用可否は[Issue #44](https://github.com/ieee0824/cubase_mcp/issues/44)、起動時KEY_HELDの未確定原因は[Issue #38](https://github.com/ieee0824/cubase_mcp/issues/38)で追跡します。
 

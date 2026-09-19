@@ -58,12 +58,14 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo clippy --all-targets --locked -- -D warnings
 
-      - name: Check input-guard scripts
+      - name: Check evidence scripts
         if: runner.os == 'Linux'
         run: |
           bash -n scripts/check-input-guard-calibration.sh
           bash -n scripts/check-input-guard-sampling.sh
           bash -n scripts/start-input-guard.sh
+          bash -n scripts/check-track-probe-evidence.sh
+          node tests/track_probe_evidence_checker.test.js
           node tests/finder_calibration_state.test.js
           node --test tests/input_guard_sampling_checker.test.js
 

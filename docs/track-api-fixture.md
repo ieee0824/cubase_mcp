@@ -1,5 +1,7 @@
 # Track API実機検証fixture
 
+入力ガードを用いた操作の校正・証跡保存・復旧は[入力ガード手順](input-guard-calibration-recovery.md)を参照してください。校正用8プロセスの検証は、この文書のCubase観測やTrack API対応を証明しません。正式runの証跡監査には`scripts/check-track-probe-evidence.sh`を使用します。実測前の原本・操作context・menu画像・reload / restart時間の確認は[Issue #44](https://github.com/ieee0824/cubase_mcp/issues/44)、正式実測は[C15 / #37](https://github.com/ieee0824/cubase_mcp/issues/37)と[C13 / #36](https://github.com/ieee0824/cubase_mcp/issues/36)で追跡します。
+
 この文書は、Track列挙の実機調査と受け入れテストで同じCubase project状態を再現するための手順を定義します。`.cpr`、audio、MIDI file、presetはrepositoryへ追加しません。fixtureは各検証者が専用の一時projectとして作成します。
 
 主な利用先は[Issue #3](https://github.com/ieee0824/cubase_mcp/issues/3)のhost API調査と[Issue #22](https://github.com/ieee0824/cubase_mcp/issues/22)の受け入れテストです。列挙方式は[Issue #4](https://github.com/ieee0824/cubase_mcp/issues/4)、DTO / ID / pagination契約は[Issue #5](https://github.com/ieee0824/cubase_mcp/issues/5)で決定し、全体の依存関係は[Issue #24](https://github.com/ieee0824/cubase_mcp/issues/24)で管理します。

@@ -4,7 +4,7 @@
 
 文書状態: `PENDING_RUNTIME`
 
-Input / Outputの未調査範囲には[既存I/O専用Probe](io-existing-channels-probe.md)を使用します。primaryの結果へ混ぜず、構造検証と実機での観測・UI照合を区別します。
+Input / Outputの読み取り専用調査基盤は後続の[分割計画C / #43](https://github.com/ieee0824/cubase_mcp/issues/43)、実機観測は[Issue #33](https://github.com/ieee0824/cubase_mcp/issues/33)で扱います。この段階にはI/O専用Probeやcollector profileを含めません。primaryの結果へ混ぜず、構造検証と実機での観測・UI照合を区別します。
 
 校正の再試行単位と完了済み記録の扱いは[入力ガード校正の復旧手順](input-guard-calibration-recovery.md)を参照してください。校正の部分結果、offline test、CI成功は、この文書のruntime観測を完了させません。Issue #3に含まれるInput / Outputも、primary profileでのO1 skipとは区別して未完了として追跡します。
 
